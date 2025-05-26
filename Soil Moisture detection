@@ -1,0 +1,83 @@
+// Pin Definitions
+#define LEDR_PIN_VIN 7
+#define SOILMOISTURE_5V1_1_PIN_SIG A2
+#define SOILMOISTURE_5V2_2_PIN_SIG A3
+#define SOILMOISTURE_5V3_3_PIN_SIG A4
+
+// Global variables
+const int timeout = 10000; // 10 seconds
+char menuOption = 0;
+long time0;
+
+void setup() {
+    // Initialize Serial
+    Serial.begin(9600);
+    while (!Serial);
+
+    // Set LED pin as output
+    pinMode(LEDR_PIN_VIN, OUTPUT);
+
+    Serial.println("start");
+
+    menuOption = menu();
+}
+
+void loop() {
+    if (menuOption == '1') {
+        // Fade out the red LED
+        for (int i = 255; i > 0; i -= 5) {
+            analogWrite(LEDR_PIN_VIN, i);  // dim LED
+            delay(15);
+        }
+        digitalWrite(LEDR_PIN_VIN, LOW); // turn off LED
+    }
+    else if (menuOption == '2') {
+        int val = analogRead(SOILMOISTURE_5V1_1_PIN_SIG);
+        Serial.print(F("Soil Moisture Sensor #1 Value: "));
+        Serial.println(val);
+    }
+    else if (menuOption == '3') {
+        int val = analogRead(SOILMOISTURE_5V2_2_PIN_SIG);
+        Serial.print(F("Soil Moisture Sensor #2 Value: "));
+        Serial.println(val);
+    }
+    else if (menuOption == '4') {
+        int val = analogRead(SOILMOISTURE_5V3_3_PIN_SIG);
+        Serial.print(F("Soil Moisture Sensor #3 Value: "));
+        Serial.println(val);
+    }
+
+    // Re-display menu after timeout
+    if (millis() - time0 > timeout) {
+        menuOption = menu();
+    }
+}
+
+// Menu function
+char menu() {
+    Serial.println(F("\nWhich component would you like to test?"));
+    Serial.println(F("(1) Basic Red LED 5mm"));
+    Serial.println(F("(2) Soil Moisture Sensor #1"));
+    Serial.println(F("(3) Soil Moisture Sensor #2"));
+    Serial.println(F("(4) Soil Moisture Sensor #3"));
+    Serial.println(F("(menu) send anything else or press the reset button\n"));
+
+    while (!Serial.available());
+
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (isAlphaNumeric(c)) {
+            if (c == '1') Serial.println(F("Now Testing Basic Red LED 5mm"));
+            else if (c == '2') Serial.println(F("Now Testing Soil Moisture Sensor #1"));
+            else if (c == '3') Serial.println(F("Now Testing Soil Moisture Sensor #2"));
+            else if (c == '4') Serial.println(F("Now Testing Soil Moisture Sensor #3"));
+            else {
+                Serial.println(F("Illegal input!"));
+                return 0;
+            }
+            time0 = millis();
+            return c;
+        }
+    }
+    return 0;
+}
