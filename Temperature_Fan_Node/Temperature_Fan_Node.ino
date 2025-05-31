@@ -5,9 +5,9 @@
 #define RELAY_PIN 7        // Relay control pin
 #define DHT_TYPE DHT11     // DHT sensor type
 
-// Temperature thresholds (in Celsius)
-#define TEMP_THRESHOLD_ON 28.0   // Turn fan ON when temp exceeds this
-#define TEMP_THRESHOLD_OFF 25.0  // Turn fan OFF when temp drops below this
+// Temperature thresholds (in Celsius) - Adjusted for Malaysian climate
+#define TEMP_THRESHOLD_ON 32.0   // Turn fan ON when temp exceeds this (excessive heat)
+#define TEMP_THRESHOLD_OFF 29.0  // Turn fan OFF when temp drops below this (normal warm range)
 
 // Initialize DHT sensor
 DHT dht(DHT_PIN, DHT_TYPE);
@@ -29,7 +29,7 @@ void setup() {
   
   // Set relay pin as output
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW); // Start with fan OFF (relay inactive)
+  digitalWrite(RELAY_PIN, HIGH); // Start with fan OFF (relay inactive for active-LOW relay)
   
   Serial.println("System initialized successfully!");
   Serial.println("Temperature Thresholds:");
@@ -64,13 +64,13 @@ void controlFan() {
   // Hysteresis control to prevent rapid on/off switching
   if (!fanStatus && temperature > TEMP_THRESHOLD_ON) {
     // Turn fan ON
-    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(RELAY_PIN, LOW);  // LOW activates relay for active-LOW modules
     fanStatus = true;
     Serial.println(">>> FAN TURNED ON - Temperature too high!");
   }
   else if (fanStatus && temperature < TEMP_THRESHOLD_OFF) {
     // Turn fan OFF
-    digitalWrite(RELAY_PIN, LOW);
+    digitalWrite(RELAY_PIN, HIGH); // HIGH deactivates relay for active-LOW modules
     fanStatus = false;
     Serial.println(">>> FAN TURNED OFF - Temperature normalized");
   }
@@ -83,12 +83,4 @@ void displayStatus() {
   Serial.print(humidity, 1);
   Serial.print("% | Fan: ");
   Serial.println(fanStatus ? "ON" : "OFF");
-}
-
-// Optional: Function to manually control fan (for testing)
-void manualFanControl(bool state) {
-  digitalWrite(RELAY_PIN, state ? HIGH : LOW);
-  fanStatus = state;
-  Serial.print("Manual fan control: ");
-  Serial.println(state ? "ON" : "OFF");
 }
