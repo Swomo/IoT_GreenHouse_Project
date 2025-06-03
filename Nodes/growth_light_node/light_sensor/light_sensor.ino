@@ -1,10 +1,9 @@
 /*
  * IoT Greenhouse - Node 3: Light & Growth Monitoring System (3 Plants)
- * MEMORY-OPTIMIZED VERSION for Arduino Uno
+ * SIMPLIFIED CONTINUOUS MONITORING VERSION
  * 
- * This system monitors individual plant heights using 3 ultrasonic sensors,
- * ambient light levels, and automatically controls grow lights.
- * Optimized for Arduino Uno's limited memory (2KB SRAM).
+ * This system continuously monitors plant heights and ambient light.
+ * If dark for 30 seconds, all LEDs turn on automatically.
  * 
  * Hardware Requirements:
  * - Arduino Uno
@@ -13,7 +12,7 @@
  * - 3x LEDs (grow lights for each plant)
  * - 3x 220Ω resistors for LEDs
  * 
- * Author: IoT Greenhouse Team - Node 3 (Memory Optimized)
+ * Author: IoT Greenhouse Team - Node 3 (Simplified)
  * Date: 2025
  */
 
@@ -29,40 +28,36 @@
 #define LED_2 6
 #define LED_3 9
 
-// Thresholds
-#define LIGHT_LOW 300
-#define LIGHT_HIGH 500
-#define MAX_BRIGHTNESS 255
-#define MIN_BRIGHTNESS 80
-#define SEEDLING_HEIGHT 5.0
-#define VEGETATIVE_HEIGHT 15.0
-#define MATURE_HEIGHT 25.0
-#define SENSOR_HEIGHT 50.0
-#define POT_HEIGHT 10.0
+// Thresholds - Updated for your LDR readings
+#define LIGHT_THRESHOLD 30      // Above this = bright, below = dark
+#define LED_BRIGHTNESS 200      // LED brightness when on (0-255)
+//#define DARK_DELAY 5000       // 5 second dark delay for testing
+#define DARK_DELAY 5000        // 30 seconds in milliseconds in practice, 5 seconds for testing purposes
+#define SENSOR_HEIGHT 50.0      // Height of sensors from ground (cm)
+#define POT_HEIGHT 10.0         // Height of plant pots (cm)
 
 // Timing
-#define READ_INTERVAL 5000
-#define LOG_INTERVAL 30000
-#define TIMEOUT 10000
+#define SENSOR_READ_INTERVAL 2000   // Read sensors every 2 seconds
+#define STATUS_DISPLAY_INTERVAL 5000 // Display status every 5 seconds
 
-// Plant data (using separate arrays to save memory)
+// Plant data
 float plantHeight[3] = {0, 0, 0};
-float prevHeight[3] = {0, 0, 0};
-byte plantStage[3] = {0, 0, 0};
-byte ledBrightness[3] = {0, 0, 0};
-bool needsLight[3] = {false, false, false};
-
-// System variables
 int lightLevel = 0;
-bool lightsActive = false;
-unsigned long lastRead = 0;
-unsigned long lastLog = 0;
-unsigned long time0 = 0;
-char menuOption = 0;
+bool ledsOn = false;
+
+// Timing variables
+unsigned long lastSensorRead = 0;
+unsigned long lastStatusDisplay = 0;
+unsigned long darkStartTime = 0;
+bool isDark = false;
+bool darkTimerStarted = false;
 
 void setup() {
   Serial.begin(9600);
-  Serial.println(F("IoT Greenhouse Node 3 - Memory Optimized"));
+  Serial.println(F("=== IoT Greenhouse Node 3 - Continuous Monitor ==="));
+  Serial.println(F("Monitoring 3 plants with automatic lighting"));
+  Serial.println(F("LEDs activate after 30 seconds of darkness"));
+  Serial.println();
   
   // Initialize pins
   pinMode(TRIG_1, OUTPUT);
@@ -75,287 +70,235 @@ void setup() {
   pinMode(LED_2, OUTPUT);
   pinMode(LED_3, OUTPUT);
   
-  // Turn off LEDs
+  // Turn off LEDs initially
   analogWrite(LED_1, 0);
   analogWrite(LED_2, 0);
   analogWrite(LED_3, 0);
   
-  Serial.println(F("System ready"));
-  menuOption = menu();
+  Serial.println(F("System initialized - Starting continuous monitoring..."));
+  Serial.println(F("Light threshold: < 30 = dark"));
+  Serial.println(F("Expected readings: Lit room ~50, Covered ~10-15, Flashlight ~100-240"));
+  Serial.println(F("Dark delay: 30 seconds"));
+  Serial.println(F("LED brightness: 200/255"));
+  Serial.println();
 }
 
 void loop() {
-  if (menuOption == '1') {
-    // Full monitoring
-    if (millis() - lastRead >= READ_INTERVAL) {
-      readAllSensors();
-      controlLights();
-      displayStatus();
-      lastRead = millis();
-    }
-    
-    if (millis() - lastLog >= LOG_INTERVAL) {
-      logData();
-      lastLog = millis();
-    }
-  }
-  else if (menuOption == '2') {
-    testPlants();
-    menuOption = menu();
-  }
-  else if (menuOption == '3') {
-    testLight();
-    menuOption = menu();
-  }
-  else if (menuOption == '4') {
-    testLEDs();
-    menuOption = menu();
+  unsigned long currentTime = millis();
+  
+  // Read sensors every 2 seconds
+  if (currentTime - lastSensorRead >= SENSOR_READ_INTERVAL) {
+    readAllSensors();
+    checkLightConditions();
+    lastSensorRead = currentTime;
   }
   
-  // Menu timeout
-  if (millis() - time0 > TIMEOUT) {
-    menuOption = menu();
+  // Display status every 5 seconds
+  if (currentTime - lastStatusDisplay >= STATUS_DISPLAY_INTERVAL) {
+    displayStatus();
+    lastStatusDisplay = currentTime;
   }
   
-  delay(100);
+  delay(100); // Small delay for stability
 }
 
 void readAllSensors() {
-  // Read light level
+  // Read ambient light level
   lightLevel = analogRead(LDR_PIN);
   
-  // Read plant heights
-  plantHeight[0] = readHeight(TRIG_1, ECHO_1);
-  delay(50);
-  plantHeight[1] = readHeight(TRIG_2, ECHO_2);
-  delay(50);
-  plantHeight[2] = readHeight(TRIG_3, ECHO_3);
+  // Read plant heights with delays to avoid sensor interference
+  plantHeight[0] = readPlantHeight(TRIG_1, ECHO_1);
+  delay(60);
   
-  // Update growth stages
-  for (byte i = 0; i < 3; i++) {
-    if (plantHeight[i] > 0) {
-      plantStage[i] = getGrowthStage(plantHeight[i]);
-    }
-  }
+  plantHeight[1] = readPlantHeight(TRIG_2, ECHO_2);
+  delay(60);
+  
+  plantHeight[2] = readPlantHeight(TRIG_3, ECHO_3);
 }
 
-float readHeight(byte trigPin, byte echoPin) {
+float readPlantHeight(byte trigPin, byte echoPin) {
+  // Send ultrasonic pulse
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
   digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
   
+  // Read echo duration with timeout
   long duration = pulseIn(echoPin, HIGH, 30000);
-  if (duration == 0) return -1;
+  if (duration == 0) return -1; // No echo received
   
+  // Calculate distance in cm
   float distance = (duration * 0.034) / 2;
+  
+  // Convert to plant height
   float height = SENSOR_HEIGHT - distance - POT_HEIGHT;
   
-  return (height > 0 && height < 40) ? height : -1;
+  // Return valid height or -1 for invalid reading
+  return (height > 0 && height < 50) ? height : -1;
 }
 
-byte getGrowthStage(float height) {
-  if (height <= SEEDLING_HEIGHT) return 0;
-  else if (height <= VEGETATIVE_HEIGHT) return 1;
-  else if (height <= MATURE_HEIGHT) return 2;
-  else return 3;
-}
-
-void controlLights() {
-  // Global lighting decision
-  lightsActive = (lightLevel < LIGHT_LOW);
+void checkLightConditions() {
+  unsigned long currentTime = millis();
   
-  // Control individual LEDs
-  byte pins[] = {LED_1, LED_2, LED_3};
+  // Check if it's currently dark
+  bool currentlyDark = (lightLevel < LIGHT_THRESHOLD);
   
-  for (byte i = 0; i < 3; i++) {
-    byte targetBrightness = 0;
-    
-    if (lightsActive && plantHeight[i] > 0) {
-      // Base brightness from light deficit
-      int deficit = LIGHT_HIGH - lightLevel;
-      byte baseBright = map(deficit, 0, LIGHT_HIGH, MIN_BRIGHTNESS, MAX_BRIGHTNESS);
-      
-      // Adjust for growth stage
-      switch (plantStage[i]) {
-        case 0: targetBrightness = baseBright * 0.6; break; // Seedling
-        case 1: targetBrightness = baseBright; break;       // Vegetative
-        case 2: targetBrightness = baseBright * 0.8; break; // Mature
-        case 3: targetBrightness = baseBright * 0.5; break; // Overgrown
+  if (currentlyDark) {
+    // It's dark now
+    if (!isDark) {
+      // Just became dark - start the timer
+      isDark = true;
+      darkTimerStarted = true;
+      darkStartTime = currentTime;
+      Serial.print(F(">>> DARK DETECTED (Light: "));
+      Serial.print(lightLevel);
+      Serial.println(F(") - Starting 30 second timer..."));
+    } else if (darkTimerStarted) {
+      // Still dark - check if 30 seconds have passed
+      if (currentTime - darkStartTime >= DARK_DELAY) {
+        // 30 seconds of darkness - turn on LEDs
+        if (!ledsOn) {
+          turnOnLEDs();
+        }
+        // Keep timer active - don't set darkTimerStarted = false
+        // This allows LEDs to stay on while it remains dark
       }
-      
-      targetBrightness = constrain(targetBrightness, MIN_BRIGHTNESS, MAX_BRIGHTNESS);
     }
-    
-    // Update LED if significant change
-    if (abs(targetBrightness - ledBrightness[i]) > 10) {
-      fadeLED(i, pins[i], targetBrightness);
+  } else {
+    // It's bright now
+    if (isDark) {
+      // Just became bright - turn off LEDs and reset timer
+      isDark = false;
+      darkTimerStarted = false;
+      if (ledsOn) {
+        turnOffLEDs();
+      }
+      Serial.print(F(">>> LIGHT DETECTED (Light: "));
+      Serial.print(lightLevel);
+      Serial.println(F(") - LEDs turning off"));
     }
-    
-    needsLight[i] = (targetBrightness > 0);
   }
 }
 
-void fadeLED(byte index, byte pin, byte target) {
-  byte current = ledBrightness[index];
-  int step = (target > current) ? 5 : -5;
+void turnOnLEDs() {
+  analogWrite(LED_1, LED_BRIGHTNESS);
+  analogWrite(LED_2, LED_BRIGHTNESS);
+  analogWrite(LED_3, LED_BRIGHTNESS);
+  ledsOn = true;
   
-  while (abs(current - target) > 5) {
-    current += step;
-    analogWrite(pin, current);
-    delay(20);
-  }
+  Serial.println(F(">>> ALL LEDs ACTIVATED - 30 seconds of darkness elapsed"));
+  Serial.print(F("    LED Brightness: "));
+  Serial.print((LED_BRIGHTNESS * 100) / 255);
+  Serial.println(F("%"));
+}
+
+void turnOffLEDs() {
+  analogWrite(LED_1, 0);
+  analogWrite(LED_2, 0);
+  analogWrite(LED_3, 0);
+  ledsOn = false;
   
-  analogWrite(pin, target);
-  ledBrightness[index] = target;
+  Serial.println(F(">>> ALL LEDs DEACTIVATED - Light detected"));
 }
 
 void displayStatus() {
+  // Light status
   Serial.print(F("Light: "));
   Serial.print(lightLevel);
-  Serial.print(F(" | Lights: "));
-  Serial.println(lightsActive ? F("ON") : F("OFF"));
   
+  if (lightLevel < LIGHT_THRESHOLD) {
+    Serial.print(F(" (DARK)"));
+    if (darkTimerStarted) {
+      unsigned long timeInDark = millis() - darkStartTime;
+      unsigned long remaining = DARK_DELAY - timeInDark;
+      Serial.print(F(" - Timer: "));
+      Serial.print(remaining / 1000);
+      Serial.print(F("s remaining"));
+    }
+  } else {
+    Serial.print(F(" (BRIGHT)"));
+  }
+  
+  Serial.print(F(" | LEDs: "));
+  Serial.print(ledsOn ? F("ON") : F("OFF"));
+  
+  if (ledsOn) {
+    Serial.print(F(" ("));
+    Serial.print((LED_BRIGHTNESS * 100) / 255);
+    Serial.print(F("%)"));
+  }
+  
+  Serial.println();
+  
+  // Plant heights
   for (byte i = 0; i < 3; i++) {
-    Serial.print(F("P"));
+    Serial.print(F("Plant "));
     Serial.print(i + 1);
     Serial.print(F(": "));
     
     if (plantHeight[i] > 0) {
       Serial.print(plantHeight[i], 1);
-      Serial.print(F("cm "));
-      Serial.print(getStageText(plantStage[i]));
-      Serial.print(F(" LED:"));
-      Serial.print((ledBrightness[i] * 100) / 255);
-      Serial.print(F("%"));
+      Serial.print(F(" cm"));
+      
+      // Add growth stage
+      if (plantHeight[i] <= 5.0) {
+        Serial.print(F(" (Seedling)"));
+      } else if (plantHeight[i] <= 15.0) {
+        Serial.print(F(" (Vegetative)"));
+      } else if (plantHeight[i] <= 25.0) {
+        Serial.print(F(" (Mature)"));
+      } else {
+        Serial.print(F(" (Overgrown)"));
+      }
     } else {
       Serial.print(F("No reading"));
     }
     
     if (i < 2) Serial.print(F(" | "));
   }
+  
   Serial.println();
+  Serial.println(F("----------------------------------------"));
 }
 
-const char* getStageText(byte stage) {
-  switch (stage) {
-    case 0: return "Seed";
-    case 1: return "Veg";
-    case 2: return "Mat";
-    case 3: return "Over";
-    default: return "Unk";
-  }
-}
-
-void logData() {
-  Serial.println(F("=== LOG ==="));
-  for (byte i = 0; i < 3; i++) {
-    Serial.print(F("Plant"));
-    Serial.print(i + 1);
-    Serial.print(F(": "));
-    Serial.print(plantHeight[i], 1);
-    Serial.print(F("cm "));
-    Serial.println(getStageText(plantStage[i]));
-  }
-  Serial.println(F("==========="));
-}
-
-void testPlants() {
-  Serial.println(F("Testing plants..."));
-  
-  for (byte i = 0; i < 3; i++) {
-    Serial.print(F("Plant "));
-    Serial.print(i + 1);
-    Serial.print(F(": "));
+// Optional: Add a simple command to manually test LEDs
+void checkSerialCommands() {
+  if (Serial.available()) {
+    char command = Serial.read();
     
-    float height = -1;
-    if (i == 0) height = readHeight(TRIG_1, ECHO_1);
-    else if (i == 1) height = readHeight(TRIG_2, ECHO_2);
-    else height = readHeight(TRIG_3, ECHO_3);
-    
-    if (height > 0) {
-      Serial.print(height, 1);
-      Serial.print(F("cm "));
-      Serial.println(getStageText(getGrowthStage(height)));
-    } else {
-      Serial.println(F("Invalid"));
+    switch (command) {
+      case 't':
+      case 'T':
+        // Test LEDs manually
+        Serial.println(F("Manual LED test..."));
+        analogWrite(LED_1, 255);
+        analogWrite(LED_2, 255);
+        analogWrite(LED_3, 255);
+        delay(2000);
+        analogWrite(LED_1, 0);
+        analogWrite(LED_2, 0);
+        analogWrite(LED_3, 0);
+        Serial.println(F("LED test complete"));
+        break;
+        
+      case 's':
+      case 'S':
+        // Show current sensor readings
+        Serial.println(F("=== SENSOR READINGS ==="));
+        Serial.print(F("Raw light value: "));
+        Serial.println(lightLevel);
+        for (byte i = 0; i < 3; i++) {
+          Serial.print(F("Plant "));
+          Serial.print(i + 1);
+          Serial.print(F(" height: "));
+          Serial.println(plantHeight[i]);
+        }
+        Serial.println(F("====================="));
+        break;
     }
     
-    delay(500);
+    // Clear remaining characters
+    while (Serial.available()) Serial.read();
   }
-}
-
-void testLight() {
-  Serial.println(F("Testing light sensor..."));
-  
-  for (byte i = 0; i < 5; i++) {
-    int reading = analogRead(LDR_PIN);
-    Serial.print(F("Reading "));
-    Serial.print(i + 1);
-    Serial.print(F(": "));
-    Serial.print(reading);
-    
-    if (reading < LIGHT_LOW) Serial.println(F(" (DARK)"));
-    else if (reading > LIGHT_HIGH) Serial.println(F(" (BRIGHT)"));
-    else Serial.println(F(" (MED)"));
-    
-    delay(500);
-  }
-}
-
-void testLEDs() {
-  Serial.println(F("Testing LEDs..."));
-  byte pins[] = {LED_1, LED_2, LED_3};
-  
-  for (byte i = 0; i < 3; i++) {
-    Serial.print(F("LED "));
-    Serial.println(i + 1);
-    
-    // Fade up
-    for (byte b = 0; b <= 255; b += 25) {
-      analogWrite(pins[i], b);
-      delay(50);
-    }
-    
-    delay(500);
-    
-    // Fade down
-    for (int b = 255; b >= 0; b -= 25) {
-      analogWrite(pins[i], b);
-      delay(50);
-    }
-    
-    delay(200);
-  }
-  
-  Serial.println(F("LED test complete"));
-}
-
-char menu() {
-  Serial.println(F("\n=== MENU ==="));
-  Serial.println(F("1) Monitor"));
-  Serial.println(F("2) Test Plants"));
-  Serial.println(F("3) Test Light"));
-  Serial.println(F("4) Test LEDs"));
-  Serial.println(F("============"));
-
-  while (!Serial.available());
-
-  while (Serial.available()) {
-    char c = Serial.read();
-    if (c >= '1' && c <= '4') {
-      switch(c) {
-        case '1': Serial.println(F("Starting monitor...")); break;
-        case '2': Serial.println(F("Testing plants...")); break;
-        case '3': Serial.println(F("Testing light...")); break;
-        case '4': Serial.println(F("Testing LEDs...")); break;
-      }
-      time0 = millis();
-      return c;
-    }
-  }
-  
-  Serial.println(F("Invalid! Use 1-4"));
-  return 0;
 }
