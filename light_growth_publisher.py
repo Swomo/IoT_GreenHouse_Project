@@ -236,6 +236,7 @@ class LightGrowthNodePublisher:
                 growth_stage = match[2]  # Seedling, Vegetative, Mature, Overgrown
                 
                 plants[f"plant_{plant_num}"] = {
+                    "sector": plant_num,
                     "height_cm": height,
                     "growth_stage": growth_stage
                 }
@@ -245,6 +246,7 @@ class LightGrowthNodePublisher:
             for match in no_reading_matches:
                 plant_num = int(match)
                 plants[f"plant_{plant_num}"] = {
+                    "sector": plant_num,
                     "height_cm": -1,
                     "growth_stage": "No Reading"
                 }
