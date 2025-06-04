@@ -178,48 +178,54 @@ class LightNodeCommandListener:
             logger.error(f"❌ Error polling for commands: {e}")
             return 0
     
-    def process_light_command(self, command):
-        """Process light control command and send to Arduino"""
-        action = command.get('action', 'toggle').upper()
-        brightness = command.get('brightness', 80)
+def process_light_command(self, command):
+    """Process light control command and send to Arduino"""
+    action = command.get('action', 'toggle').upper()
+    brightness = command.get('brightness')  # This might be None
+    
+    # FIX: Handle None brightness - just use fixed values for ON/OFF LEDs
+    if action == 'OFF':
+        brightness = 0  # Always 0 for OFF
+    else:
+        brightness = 100  # Always 100 for ON (or any value > 0)
+    
+    logger.info(f"💡 Processing light command: {action} at {brightness}% brightness")
+    
+    if not self.arduino_connection:
+        logger.error("❌ No Arduino connection available")
+        return False
+    
+    try:
+        # Format command for Arduino: "LIGHTS_ON_100", "LIGHTS_OFF_0", "LIGHTS_AUTO_100"
+        arduino_command = f"LIGHTS_{action}_{brightness}"
         
-        logger.info(f"💡 Processing light command: {action} at {brightness}% brightness")
+        # Send command to Arduino
+        self.arduino_connection.write((arduino_command + '\n').encode())
+        self.arduino_connection.flush()
         
-        if not self.arduino_connection:
-            logger.error("❌ No Arduino connection available")
-            return False
+        logger.info(f"📤 Sent to Arduino: {arduino_command}")
         
-        try:
-            # Format command for Arduino: "LIGHTS_ON_80", "LIGHTS_OFF_0", "LIGHTS_AUTO_80"
-            arduino_command = f"LIGHTS_{action}_{brightness}"
+        # Wait for Arduino response
+        time.sleep(1)
+        if self.arduino_connection.in_waiting > 0:
+            response = self.arduino_connection.readline().decode('utf-8', errors='ignore').strip()
+            logger.info(f"📥 Arduino response: {response}")
             
-            # Send command to Arduino
-            self.arduino_connection.write((arduino_command + '\n').encode())
-            self.arduino_connection.flush()
-            
-            logger.info(f"📤 Sent to Arduino: {arduino_command}")
-            
-            # Wait for Arduino response
-            time.sleep(1)
-            if self.arduino_connection.in_waiting > 0:
-                response = self.arduino_connection.readline().decode('utf-8', errors='ignore').strip()
-                logger.info(f"📥 Arduino response: {response}")
-                
-                # Check if command was accepted
-                if "LIGHTS" in response and action in response:
-                    logger.info(f"✅ Light command executed successfully: {action} at {brightness}%")
-                    return True
-                elif "INVALID" in response or "ERROR" in response:
-                    logger.error(f"❌ Arduino rejected command: {response}")
-                    return False
-            
-            # Consider it successful if we got this far
-            logger.info(f"✅ Light command sent successfully: {action} at {brightness}%")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Error sending light command: {e}")
-            return False
+            # Check if command was accepted
+            if "LIGHTS" in response and action in response:
+                logger.info(f"✅ Light command executed successfully: {action}")
+                return True
+            elif "INVALID" in response or "ERROR" in response:
+                logger.error(f"❌ Arduino rejected command: {response}")
+                return False
+        
+        # Consider it successful if we got this far
+        logger.info(f"✅ Light command sent successfully: {action}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Error sending light command: {e}")
+        return False
     
     def test_arduino_connection(self):
         """Test Arduino connection and get status"""
