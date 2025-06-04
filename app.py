@@ -4,7 +4,8 @@ import subprocess
 import mysql.connector
 from mysql.connector import Error
 from datetime import datetime
-
+import logging
+import traceback
 
 app = Flask(__name__)
 
