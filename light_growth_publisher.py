@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-IoT Greenhouse - Soil Moisture Node MQTT Publisher
-Reads soil moisture data from Arduino via serial and publishes to AWS IoT Core
+IoT Greenhouse - Light & Growth Node MQTT Publisher
+Reads light and plant height data from Arduino via serial and publishes to AWS IoT Core
 
 Requirements:
 - pip install pyserial
 - pip install AWSIoTPythonSDK
 
-Hachiware:
-- Arduino running Soil_Moisture_Node.ino
-- 3 soil moisture sensors (A0, A1, A2)
-- Water pump servo
-- LED status indicator
+Hardware:
+- Arduino running light_sensor.ino
+- 3x HC-SR04 Ultrasonic Sensors (plant height)
+- 1x LDR (ambient light sensing)
+- 3x LEDs (grow lights)
 - Connected via USB to Raspberry Pi
 
 Arduino Output Format:
-"Soil Moisture - A: 850 (DRY) | B: 650 (OK) | C: 400 (OK) | State: WATERING"
+"Light: 25 (DARK) | LEDs: ON (78%)"
+"Plant 1: 12.5 cm (Vegetative) | Plant 2: 8.2 cm (Seedling) | Plant 3: 18.7 cm (Mature)"
+"----------------------------------------"
 """
 
 import serial
@@ -29,23 +31,26 @@ from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
 # Configuration
 SERIAL_PORT = "/dev/ttyUSB0"  # Change to your Arduino port (/dev/ttyACM0 on some systems)
 SERIAL_BAUD = 9600
-MQTT_TOPIC = "iot_greenhouse/soil_moisture"
-CLIENT_ID = "soil_moisture_node_raspberry_pi"
+MQTT_TOPIC = "iot_greenhouse/light_growth"
+CLIENT_ID = "light_growth_node_raspberry_pi"
 
 # AWS IoT Configuration - Use your actual certificate files
 AWS_IOT_ENDPOINT = "azoj5h57hjr65-ats.iot.us-east-1.amazonaws.com"
-ROOT_CA_PATH = "./cert/AmazonRootCA1.pem"
-PRIVATE_KEY_PATH = "./cert/5435e0960ffa0fc7dee861aef3306c7ed7fac5896304b3cfa27991354fdfc227-private.pem.key"
-CERTIFICATE_PATH = "./cert/5435e0960ffa0fc7dee861aef3306c7ed7fac5896304b3cfa27991354fdfc227-certificate.pem.crt"
+ROOT_CA_PATH = "./certs/AmazonRootCA1.pem"
+PRIVATE_KEY_PATH = "./certs/5435e0960ffa0fc7dee861aef3306c7ed7fac5896304b3cfa27991354fdfc227-private.pem.key"
+CERTIFICATE_PATH = "./certs/5435e0960ffa0fc7dee861aef3306c7ed7fac5896304b3cfa27991354fdfc227-certificate.pem.crt"
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class SoilMoistureNodePublisher:
+class LightGrowthNodePublisher:
     def __init__(self):
         self.serial_connection = None
         self.mqtt_client = None
+        self.light_data = {}
+        self.plant_data = {}
+        self.data_complete = False
         self.setup_serial()
         self.setup_mqtt()
         
@@ -87,91 +92,143 @@ class SoilMoistureNodePublisher:
             logger.error(f"Failed to setup MQTT connection: {e}")
             raise
     
-    def parse_arduino_output(self, line):
+    def parse_light_line(self, line):
         """
-        Parse Arduino serial output and extract soil moisture data
-        Expected format: "Soil Moisture - A: 850 (DRY) | B: 650 (OK) | C: 400 (OK) | State: WATERING"
+        Parse light sensor line
+        Expected format: "Light: 25 (DARK) | LEDs: ON (78%)" or "Light: 50 (BRIGHT) | LEDs: OFF"
         """
         try:
-            # Clean the line
+            # Extract light level and status
+            light_match = re.search(r'Light:\s*(\d+)\s*\((\w+)\)', line)
+            if not light_match:
+                return None
+                
+            light_level = int(light_match.group(1))
+            light_status = light_match.group(2)  # DARK or BRIGHT
+            
+            # Extract LED status and brightness
+            led_status = "OFF"
+            led_brightness = 0
+            timer_remaining = 0
+            
+            if "LEDs: ON" in line:
+                led_status = "ON"
+                brightness_match = re.search(r'LEDs:\s*ON\s*\((\d+)%\)', line)
+                if brightness_match:
+                    led_brightness = int(brightness_match.group(1))
+            elif "LEDs: OFF" in line:
+                led_status = "OFF"
+            
+            # Extract timer if present
+            timer_match = re.search(r'Timer:\s*(\d+)s remaining', line)
+            if timer_match:
+                timer_remaining = int(timer_match.group(1))
+            
+            return {
+                "light_level": light_level,
+                "light_status": light_status,
+                "led_status": led_status,
+                "led_brightness": led_brightness,
+                "timer_remaining": timer_remaining
+            }
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse light line '{line}': {e}")
+            return None
+    
+    def parse_plant_line(self, line):
+        """
+        Parse plant height line
+        Expected format: "Plant 1: 12.5 cm (Vegetative) | Plant 2: 8.2 cm (Seedling) | Plant 3: 18.7 cm (Mature)"
+        """
+        try:
+            plants = {}
+            
+            # Find all plant readings in the line
+            plant_matches = re.findall(r'Plant\s+(\d+):\s*([\d.]+)\s*cm\s*\((\w+)\)', line)
+            
+            for match in plant_matches:
+                plant_num = int(match[0])
+                height = float(match[1])
+                growth_stage = match[2]  # Seedling, Vegetative, Mature, Overgrown
+                
+                plants[f"plant_{plant_num}"] = {
+                    "height_cm": height,
+                    "growth_stage": growth_stage
+                }
+            
+            # Also check for "No reading" plants
+            no_reading_matches = re.findall(r'Plant\s+(\d+):\s*No reading', line)
+            for match in no_reading_matches:
+                plant_num = int(match)
+                plants[f"plant_{plant_num}"] = {
+                    "height_cm": -1,
+                    "growth_stage": "No Reading"
+                }
+            
+            return plants if plants else None
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse plant line '{line}': {e}")
+            return None
+    
+    def parse_arduino_output(self, line):
+        """
+        Parse Arduino serial output and extract light and plant data
+        """
+        try:
             line = line.strip()
             
-            # Skip non-data lines (errors, status messages, etc.)
-            if not line or "Soil Moisture -" not in line:
+            # Skip empty lines and separators
+            if not line or line.startswith("---") or "Greenhouse Node 3" in line:
                 return None
             
-            # Extract soil moisture readings (raw analog values 0-1023)
-            soil_a_match = re.search(r'A:\s*(\d+)\s*\((\w+)\)', line)
-            soil_b_match = re.search(r'B:\s*(\d+)\s*\((\w+)\)', line)
-            soil_c_match = re.search(r'C:\s*(\d+)\s*\((\w+)\)', line)
-            state_match = re.search(r'State:\s*(\w+)', line)
-            growth_match = re.search(r'Growth Cycle:\s*(\d+)', line)
+            # Parse light sensor data
+            if line.startswith("Light:"):
+                self.light_data = self.parse_light_line(line)
+                return None
             
-            if soil_a_match and soil_b_match and soil_c_match and state_match:
-                # Get raw analog values (0-1023 range)
-                soil_a_raw = int(soil_a_match.group(1))
-                soil_b_raw = int(soil_b_match.group(1))
-                soil_c_raw = int(soil_c_match.group(1))
-                
-                # Get status strings (DRY, OK, WET)
-                soil_a_status = soil_a_match.group(2)
-                soil_b_status = soil_b_match.group(2)
-                soil_c_status = soil_c_match.group(2)
-                
-                # Convert raw values to percentage (inverted: lower raw value = higher moisture)
-                # 1023 = 0% moisture, 0 = 100% moisture
-                soil_a_percent = round((1023 - soil_a_raw) / 1023 * 100, 1)
-                soil_b_percent = round((1023 - soil_b_raw) / 1023 * 100, 1)
-                soil_c_percent = round((1023 - soil_c_raw) / 1023 * 100, 1)
-                
-                # Calculate average moisture percentage
-                average_moisture = round((soil_a_percent + soil_b_percent + soil_c_percent) / 3, 1)
-                
-                # Get system state
-                system_state = state_match.group(1)
-                
-                # Get growth cycle if present
-                growth_cycle = int(growth_match.group(1)) if growth_match else 0
-                
-                # Determine LED status based on system state
-                led_status = "ON" if system_state != "MONITORING" else "OFF"
-                
-                # Determine if any sensor needs watering
-                watering_needed = system_state in ["WATERING", "ALL_DRY"]
-                
-                data = {
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "node_id": "soil_moisture_node",
-                    "soil_sensors": {
-                        "sensor_a": {
-                            "raw_value": soil_a_raw,
-                            "moisture_percent": soil_a_percent,
-                            "status": soil_a_status
-                        },
-                        "sensor_b": {
-                            "raw_value": soil_b_raw,
-                            "moisture_percent": soil_b_percent,
-                            "status": soil_b_status
-                        },
-                        "sensor_c": {
-                            "raw_value": soil_c_raw,
-                            "moisture_percent": soil_c_percent,
-                            "status": soil_c_status
-                        },
-                        "average_moisture": average_moisture
-                    },
-                    "system_state": system_state,
-                    "led_status": led_status,
-                    "watering_needed": watering_needed,
-                    "growth_cycle": growth_cycle,
-                    "location": "greenhouse_section_1"
-                }
-                return data
+            # Parse plant height data
+            elif line.startswith("Plant"):
+                plant_data = self.parse_plant_line(line)
+                if plant_data:
+                    self.plant_data.update(plant_data)
+                return None
+            
+            # Check if we have complete data after parsing a separator or at the end of a status block
+            elif "---" in line or not line:
+                if self.light_data and self.plant_data:
+                    # Combine light and plant data
+                    combined_data = {
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "node_id": "light_growth_node",
+                        "light_sensor": self.light_data,
+                        "plant_heights": self.plant_data,
+                        "location": "greenhouse_section_3"
+                    }
+                    
+                    # Calculate averages and statistics
+                    valid_heights = [p["height_cm"] for p in self.plant_data.values() if p["height_cm"] > 0]
+                    if valid_heights:
+                        combined_data["statistics"] = {
+                            "average_height": round(sum(valid_heights) / len(valid_heights), 1),
+                            "max_height": max(valid_heights),
+                            "min_height": min(valid_heights),
+                            "plants_with_readings": len(valid_heights),
+                            "total_plants": len(self.plant_data)
+                        }
+                    
+                    # Reset for next reading
+                    self.light_data = {}
+                    self.plant_data = {}
+                    
+                    return combined_data
+            
+            return None
             
         except Exception as e:
             logger.warning(f"Failed to parse line '{line}': {e}")
-            
-        return None
+            return None
     
     def publish_data(self, data):
         """Publish data to AWS IoT Core"""
@@ -186,7 +243,7 @@ class SoilMoistureNodePublisher:
     
     def run(self):
         """Main loop - read serial data and publish to MQTT"""
-        logger.info("Starting soil moisture node publisher...")
+        logger.info("Starting light & growth node publisher...")
         
         consecutive_errors = 0
         max_errors = 10
@@ -267,7 +324,7 @@ class SoilMoistureNodePublisher:
 def main():
     """Main function"""
     try:
-        publisher = SoilMoistureNodePublisher()
+        publisher = LightGrowthNodePublisher()
         publisher.run()
     except Exception as e:
         logger.error(f"Failed to start publisher: {e}")
