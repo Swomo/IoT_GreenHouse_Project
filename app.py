@@ -1,4 +1,6 @@
 from flask import Flask, request, jsonify, render_template
+import requests
+import subprocess
 import mysql.connector
 from mysql.connector import Error
 from datetime import datetime
@@ -14,22 +16,26 @@ db_config = {
 }
 
 
+################### WEBSITE PAGES################################3
+
 @app.route('/')
 def dashboard():
     return render_template('index.html')
 
-@app.route('/images')
-def images():
-    return render_template('image.html')
 
-@app.route('/detection-data')
-def detection_data():
-    return render_template('datadetection.html')
 
-@app.route('/plant-control')
-def plant_control():
-    return render_template('plantcontrol.html')
 
+
+
+
+
+
+
+
+
+
+
+########################################### INGESTION OF DATA ###########################3
 @app.route('/temperature-ingest', methods=['POST'])
 def temperature_ingest():
     data = request.get_json()
@@ -185,6 +191,252 @@ def leaf_ingest():
             cursor.close()
         if conn:
             conn.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+################################################# PUBLISHER - BUTTON TO ACTUATOR #############################3
+
+
+# Command publisher endpoint (assuming it runs on port 5001)
+COMMAND_PUBLISHER_URL = "http://localhost:5001"
+
+@app.route('/api/water-plants', methods=['POST'])
+def water_plants():
+    """Forward watering commands to command publisher"""
+    try:
+        data = request.get_json() or {}
+        
+        # Forward to command publisher
+        response = requests.post(f"{COMMAND_PUBLISHER_URL}/api/water-plants", json=data, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            # Log command to database for tracking
+            conn = mysql.connector.connect(**db_config)
+            cursor = conn.cursor()
+            
+            insert_query = """
+                INSERT INTO control_commands (command_type, sector_id, duration, timestamp, status)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            current_time = datetime.now()
+            cursor.execute(insert_query, (
+                'MANUAL_WATERING', 
+                data.get('sector', 1), 
+                data.get('duration', 10), 
+                current_time, 
+                'SUCCESS'
+            ))
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            return jsonify(result)
+        else:
+            return jsonify({'error': 'Command publisher unavailable'}), 500
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/toggle-fan', methods=['POST'])
+def toggle_fan():
+    """Forward fan control commands"""
+    try:
+        data = request.get_json() or {}
+        
+        # Forward to command publisher
+        response = requests.post(f"{COMMAND_PUBLISHER_URL}/api/toggle-fan", json=data, timeout=10)
+        
+        if response.status_code == 200:
+            # Log to database
+            conn = mysql.connector.connect(**db_config)
+            cursor = conn.cursor()
+            
+            insert_query = """
+                INSERT INTO control_commands (command_type, action, timestamp, status)
+                VALUES (%s, %s, %s, %s)
+            """
+            current_time = datetime.now()
+            cursor.execute(insert_query, (
+                'FAN_CONTROL', 
+                data.get('action', 'toggle'), 
+                current_time, 
+                'SUCCESS'
+            ))
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            return response.json()
+        else:
+            return jsonify({'error': 'Command publisher unavailable'}), 500
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/toggle-lights', methods=['POST'])
+def toggle_lights():
+    """Forward light control commands"""
+    try:
+        data = request.get_json() or {}
+        
+        # Forward to command publisher
+        response = requests.post(f"{COMMAND_PUBLISHER_URL}/api/toggle-lights", json=data, timeout=10)
+        
+        if response.status_code == 200:
+            # Log to database
+            conn = mysql.connector.connect(**db_config)
+            cursor = conn.cursor()
+            
+            insert_query = """
+                INSERT INTO control_commands (command_type, action, brightness, timestamp, status)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            current_time = datetime.now()
+            cursor.execute(insert_query, (
+                'LIGHT_CONTROL', 
+                data.get('action', 'toggle'),
+                data.get('brightness', 100),
+                current_time, 
+                'SUCCESS'
+            ))
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            return response.json()
+        else:
+            return jsonify({'error': 'Command publisher unavailable'}), 500
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/system-status', methods=['GET'])
+def get_system_status():
+    """Get current system status from database"""
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor(dictionary=True)
+        
+        # Get latest sensor readings
+        queries = {
+            'temperature': """
+                SELECT temperature, humidity, timestamp 
+                FROM ventilation 
+                ORDER BY timestamp DESC 
+                LIMIT 1
+            """,
+            'soil_moisture': """
+                SELECT sector_id, soil_moisture, timestamp 
+                FROM soil_health 
+                ORDER BY timestamp DESC 
+                LIMIT 3
+            """,
+            'recent_commands': """
+                SELECT command_type, action, timestamp 
+                FROM control_commands 
+                ORDER BY timestamp DESC 
+                LIMIT 5
+            """
+        }
+        
+        results = {}
+        
+        # Execute queries
+        for key, query in queries.items():
+            cursor.execute(query)
+            results[key] = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        
+        # Format response
+        status = {
+            'temperature': results['temperature'][0]['temperature'] if results['temperature'] else 0,
+            'humidity': results['temperature'][0]['humidity'] if results['temperature'] else 0,
+            'soil_moisture': {
+                f'sector_{row["sector_id"]}': row['soil_moisture'] 
+                for row in results['soil_moisture']
+            },
+            'recent_commands': results['recent_commands'],
+            'last_updated': datetime.now().isoformat()
+        }
+        
+        return jsonify(status)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Add this to create the control_commands table
+@app.route('/setup-control-table', methods=['GET'])
+def setup_control_table():
+    """One-time setup for control commands table"""
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor()
+        
+        create_table_query = """
+            CREATE TABLE IF NOT EXISTS control_commands (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                command_type VARCHAR(50) NOT NULL,
+                sector_id INT DEFAULT NULL,
+                duration INT DEFAULT NULL,
+                action VARCHAR(20) DEFAULT NULL,
+                brightness INT DEFAULT NULL,
+                timestamp DATETIME NOT NULL,
+                status VARCHAR(20) DEFAULT 'PENDING'
+            )
+        """
+        
+        cursor.execute(create_table_query)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({'message': 'Control commands table created successfully'})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # Run the app
 if __name__ == '__main__':
