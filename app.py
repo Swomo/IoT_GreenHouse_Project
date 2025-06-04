@@ -99,7 +99,81 @@ def soil_health_ingest():
         if conn:
             conn.close()
 
+@app.route('/plant-ingest', methods=['POST'])
+def plant_ingest():
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Invalid or missing JSON data'}), 400
 
+    # Extract values from JSON
+    sector_id = data.get('sector_id')
+    height_cm = data.get('height_cm')
+
+    if sector_id is None or height_cm is None:
+        return jsonify({'error': 'Missing sector_id or height_cm'}), 400
+
+    try:
+        # Connect to MariaDB
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor()
+        
+        # Insert into plant table
+        insert_query = """
+            INSERT INTO plant (sector_id, height_cm, timestamp)
+            VALUES (%s, %s, %s)
+        """
+        current_time = datetime.now()
+        cursor.execute(insert_query, (sector_id, height_cm, current_time))
+        conn.commit()
+
+        return jsonify({'message': 'Plant data inserted successfully'}), 201
+
+    except Error as e:
+        print("Error while inserting plant data:", e)
+        return jsonify({'error': 'Database error'}), 500
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+@app.route('/leaf-ingest', methods=['POST'])
+def leaf_ingest():
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Invalid or missing JSON data'}), 400
+
+    sector_id = 1
+    leaf_count = data.get('leaf_count')
+
+    if sector_id is None or leaf_count is None:
+        return jsonify({'error': 'Missing sector_id or leaf_count'}), 400
+
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor()
+
+        insert_query = """
+            INSERT INTO leaf_count (sector_id, leaf_count, timestamp)
+            VALUES (%s, %s, %s)
+        """
+        current_time = datetime.now()
+        cursor.execute(insert_query, (sector_id, leaf_count, current_time))
+        conn.commit()
+
+        return jsonify({'message': 'Leaf count inserted successfully'}), 201
+
+    except Error as e:
+        print("Database error:", e)
+        return jsonify({'error': 'Database error'}), 500
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 # Run the app
 if __name__ == '__main__':
