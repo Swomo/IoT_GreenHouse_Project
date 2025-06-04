@@ -19,8 +19,8 @@ from datetime import datetime
 DB_CONFIG = {
     'host': '34.199.73.137',  # Your EC2 public IP
     'port': 3306,
-    'user': 'admin',
-    'password': 'StrongPasswordHere',
+    'user': 'greenhouse_edge',
+    'password': 'EdgeDevice2025!',
     'database': 'greenhouse',
     'connection_timeout': 30,
     'autocommit': True
@@ -178,7 +178,13 @@ class VentilationNodeCommandListener:
     
     def process_fan_command(self, command):
         """Process fan control command and send to Arduino"""
-        action = command.get('action', 'toggle').upper()
+        action = command.get('action', 'toggle')
+        
+        # Fix: Handle None values
+        if action is None:
+            action = 'toggle'
+        
+        action = action.upper()
         
         logger.info(f"🌬️ Processing fan command: {action}")
         

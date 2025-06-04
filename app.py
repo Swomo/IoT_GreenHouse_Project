@@ -638,30 +638,16 @@ def toggle_fan():
     """Fan control command"""
     try:
         data = request.get_json() or {}
-        action = data.get('action', 'toggle')
+        action = data.get('action', 'toggle')  # This should get 'on', 'off', or 'auto'
         
-        if action not in ['on', 'off', 'auto', 'toggle']:
-            return jsonify({'error': 'Invalid action'}), 400
-        
-        # Log to database (simplified)
+        # Log to database with the action
         conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS control_commands (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                command_type VARCHAR(50) NOT NULL,
-                sector_id INT DEFAULT NULL,
-                duration INT DEFAULT NULL,
-                timestamp DATETIME NOT NULL,
-                status VARCHAR(20) DEFAULT 'SUCCESS'
-            )
-        """)
-        
-        cursor.execute("""
-            INSERT INTO control_commands (command_type, timestamp, status)
-            VALUES (%s, %s, %s)
-        """, ('FAN_CONTROL', datetime.now(), 'SUCCESS'))
+            INSERT INTO control_commands (command_type, action, timestamp, status)
+            VALUES (%s, %s, %s, %s)
+        """, ('FAN_CONTROL', action.upper(), datetime.now(), 'SUCCESS'))
         
         conn.commit()
         cursor.close()

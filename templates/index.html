@@ -782,26 +782,26 @@
             }
         }
 
-        async function controlFan() {
-            const action = document.getElementById('fanAction').value;
-            
-            try {
-                const response = await fetch('/api/toggle-fan', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ action })
-                });
-                
-                if (response.ok) {
-                    alert(`✅ Fan set to ${action.toUpperCase()}`);
-                    closeModal('fanModal');
-                } else {
-                    alert('❌ Failed to control fan');
-                }
-            } catch (error) {
-                alert('❌ Error sending command');
-            }
+async function controlFan() {
+    const action = document.getElementById('fanAction').value; // Make sure this gets the selected value
+    
+    try {
+        const response = await fetch('/api/toggle-fan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: action }) // Send the actual selected action
+        });
+        
+        if (response.ok) {
+            alert(`✅ Fan set to ${action.toUpperCase()}`);
+            closeModal('fanModal');
+        } else {
+            alert('❌ Failed to control fan');
         }
+    } catch (error) {
+        alert('❌ Error sending command');
+    }
+}
 
         async function controlLights() {
             const action = document.getElementById('lightAction').value;
