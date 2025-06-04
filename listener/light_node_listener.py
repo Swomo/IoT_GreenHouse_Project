@@ -21,8 +21,8 @@ from datetime import datetime
 DB_CONFIG = {
     'host': '34.199.73.137',  # Your EC2 public IP
     'port': 3306,
-    'user': 'greenhouse_edge',
-    'password': 'EdgeDevice2025!',
+    'user': 'admin',
+    'password': 'StrongPasswordHere',
     'database': 'greenhouse',
     'connection_timeout': 30,
     'autocommit': True
