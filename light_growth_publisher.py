@@ -31,7 +31,7 @@ from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
 # Configuration
 SERIAL_PORT = "/dev/ttyUSB0"  # Change to your Arduino port (/dev/ttyACM0 on some systems)
 SERIAL_BAUD = 9600
-MQTT_TOPIC = "iot_greenhouse/light_growth"
+MQTT_TOPIC = "schedule_1/light_growth"
 CLIENT_ID = "light_growth_node_raspberry_pi"
 
 # AWS IoT Configuration - Use your actual certificate files
