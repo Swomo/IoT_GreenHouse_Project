@@ -1,0 +1,11 @@
+/* Dashboard specific styles */
+
+.section {
+    display: none;
+}
+
+.section.active {
+    display: block;
+}
+
+/* Additional dashboard styles can be added here */

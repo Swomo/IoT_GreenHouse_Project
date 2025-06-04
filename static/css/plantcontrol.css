@@ -1,0 +1,98 @@
+/* Plant control page specific styles */
+
+.button-group {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+    margin-bottom: 30px;
+    padding: 20px;
+}
+
+.control-btn {
+    padding: 20px;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 18px;
+    font-weight: 500;
+    transition: all 0.3s;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    min-height: 120px;
+    justify-content: center;
+}
+
+.control-btn i {
+    font-size: 32px;
+}
+
+.water-btn {
+    background: var(--blue);
+    color: var(--light);
+}
+
+.water-btn:hover {
+    background: var(--blue);
+    filter: brightness(0.9);
+    transform: translateY(-2px);
+}
+
+.ventilation-btn {
+    background: var(--orange);
+    color: var(--light);
+}
+
+.ventilation-btn:hover {
+    background: var(--orange);
+    filter: brightness(0.9);
+    transform: translateY(-2px);
+}
+
+.light-btn {
+    background: var(--yellow);
+    color: var(--light);
+}
+
+.light-btn:hover {
+    background: var(--yellow);
+    filter: brightness(0.9);
+    transform: translateY(-2px);
+}
+
+.status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 20px;
+    padding: 20px;
+}
+
+.status-item {
+    text-align: center;
+    padding: 20px;
+    background: var(--grey);
+    border-radius: 8px;
+}
+
+.status-item i {
+    font-size: 24px;
+    margin-bottom: 10px;
+}
+
+.status-item h4 {
+    color: var(--dark);
+    margin-bottom: 5px;
+}
+
+.status-item p {
+    color: var(--dark-grey);
+}
+
+.status-active {
+    color: var(--orange);
+}
+
+.status-inactive {
+    color: var(--red);
+}
