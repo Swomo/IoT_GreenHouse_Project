@@ -144,16 +144,19 @@ class SoilMoistureNodePublisher:
                     "node_id": "soil_moisture_node",
                     "soil_sensors": {
                         "sensor_a": {
+                            "sector": 1,
                             "raw_value": soil_a_raw,
                             "moisture_percent": soil_a_percent,
                             "status": soil_a_status
                         },
                         "sensor_b": {
+                            "sector": 2,
                             "raw_value": soil_b_raw,
                             "moisture_percent": soil_b_percent,
                             "status": soil_b_status
                         },
                         "sensor_c": {
+                            "sector": 3,
                             "raw_value": soil_c_raw,
                             "moisture_percent": soil_c_percent,
                             "status": soil_c_status
