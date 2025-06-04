@@ -4,17 +4,35 @@ import subprocess
 import mysql.connector
 from mysql.connector import Error
 from datetime import datetime
+
+
 app = Flask(__name__)
 
 
 
-db_config = {
-    'host': 'localhost',      # or your DB host IP
-    'user': 'admin',
-    'password': 'StrongPasswordHere',
-    'database': 'greenhouse',
-}
+# Enable debug logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
+
+# db_config = {
+#     'host': 'localhost',      # or your DB host IP
+#     'user': 'admin',
+#     'password': 'StrongPasswordHere',
+#     'database': 'greenhouse',
+# }
+
+db_config = {
+    'host': 'localhost',          # Changed to localhost since DB is on same EC2
+    'port': 3306,
+    'user': 'admin',              # Your MySQL username
+    'password': 'StrongPasswordHere',  # Your MySQL password
+    'database': 'greenhouse',
+    'autocommit': True,
+    'connection_timeout': 30,
+    'charset': 'utf8mb4',
+    'use_unicode': True
+}
 
 # #### FOR TESTING ###
 # # connects to cloud database from local pc
@@ -28,6 +46,20 @@ db_config = {
 #     'connection_timeout': 30,
 #     'raise_on_warnings': True
 # }
+
+
+def get_db_connection():
+    """Get database connection with error handling"""
+    try:
+        conn = mysql.connector.connect(**db_config)
+        return conn
+    except Error as e:
+        logger.error(f"Database connection error: {e}")
+        raise
+
+
+
+
 
 
 ################### WEBSITE PAGES################################3
@@ -235,235 +267,316 @@ def leaf_ingest():
 
 COMMAND_PUBLISHER_URL = "http://localhost:5001"
 
-@app.route('/api/dashboard-data', methods=['GET'])
-def get_dashboard_data():
-    """Get comprehensive dashboard data from database"""
+@app.route('/debug-db', methods=['GET'])
+def debug_database():
+    """Debug database connection and data"""
     try:
-        conn = mysql.connector.connect(**db_config)
+        conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         
-        # Get latest temperature and humidity
-        cursor.execute("""
-            SELECT temperature, humidity, timestamp 
-            FROM ventilation 
-            ORDER BY timestamp DESC 
-            LIMIT 1
-        """)
-        latest_ventilation = cursor.fetchone()
+        # Check if tables exist
+        cursor.execute("SHOW TABLES")
+        tables = cursor.fetchall()
         
-        # Get latest soil moisture per sector
-        cursor.execute("""
-            SELECT DISTINCT s1.sector_id, s1.raw_value, s1.soil_moisture, s1.timestamp
-            FROM soil_health s1
-            INNER JOIN (
-                SELECT sector_id, MAX(timestamp) as max_timestamp
-                FROM soil_health
-                GROUP BY sector_id
-            ) s2 ON s1.sector_id = s2.sector_id AND s1.timestamp = s2.max_timestamp
-            ORDER BY s1.sector_id
-        """)
-        latest_soil = cursor.fetchall()
+        result = {
+            'connection': 'SUCCESS',
+            'database': db_config['database'],
+            'host': db_config['host'],
+            'tables': [table[f'Tables_in_{db_config["database"]}'] for table in tables]
+        }
         
-        # Get latest plant heights per sector
-        cursor.execute("""
-            SELECT DISTINCT p1.sector_id, p1.height_cm, p1.timestamp
-            FROM plant p1
-            INNER JOIN (
-                SELECT sector_id, MAX(timestamp) as max_timestamp
-                FROM plant
-                GROUP BY sector_id
-            ) p2 ON p1.sector_id = p2.sector_id AND p1.timestamp = p2.max_timestamp
-            ORDER BY p1.sector_id
-        """)
-        latest_plants = cursor.fetchall()
-        
-        # Get latest leaf count
-        cursor.execute("""
-            SELECT leaf_count, timestamp 
-            FROM leaf_count 
-            ORDER BY timestamp DESC 
-            LIMIT 1
-        """)
-        latest_leaf_count = cursor.fetchone()
-        
-        # Get temperature and humidity trend (last 24 hours, 1 reading per hour)
-        cursor.execute("""
-            SELECT 
-                AVG(temperature) as temperature,
-                AVG(humidity) as humidity,
-                DATE_FORMAT(timestamp, '%Y-%m-%d %H:00:00') as hour_timestamp
-            FROM ventilation 
-            WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-            GROUP BY DATE_FORMAT(timestamp, '%Y-%m-%d %H')
-            ORDER BY hour_timestamp ASC
-        """)
-        temp_trend = cursor.fetchall()
-        
-        # Get plant growth trend (last 7 days)
-        cursor.execute("""
-            SELECT sector_id, height_cm, timestamp
-            FROM plant 
-            WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-            ORDER BY timestamp ASC
-        """)
-        plant_trend = cursor.fetchall()
+        # Check each table
+        for table_info in tables:
+            table_name = table_info[f'Tables_in_{db_config["database"]}']
+            cursor.execute(f"SELECT COUNT(*) as count FROM {table_name}")
+            count = cursor.fetchone()
+            cursor.execute(f"SELECT * FROM {table_name} ORDER BY timestamp DESC LIMIT 1")
+            latest = cursor.fetchone()
+            
+            result[f'{table_name}_info'] = {
+                'count': count['count'],
+                'latest_record': latest
+            }
         
         cursor.close()
         conn.close()
         
-        # Format response
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Debug database error: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'connection': 'FAILED',
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+@app.route('/api/dashboard-data', methods=['GET'])
+def get_dashboard_data():
+    """Get comprehensive dashboard data from database with extensive error handling"""
+    try:
+        logger.info("Starting dashboard data fetch...")
+        
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        # Initialize response with default values
         dashboard_data = {
             'current_conditions': {
-                'temperature': float(latest_ventilation['temperature']) if latest_ventilation else 0,
-                'humidity': float(latest_ventilation['humidity']) if latest_ventilation else 0,
-                'last_updated': latest_ventilation['timestamp'].isoformat() if latest_ventilation else None
+                'temperature': 0,
+                'humidity': 0,
+                'last_updated': None
             },
             'soil_moisture': {
-                'current': {
-                    f'sector_{row["sector_id"]}': {
-                        'moisture_percent': row['soil_moisture'],
-                        'raw_value': row['raw_value'],
-                        'status': get_soil_status(row['soil_moisture']),
-                        'timestamp': row['timestamp'].isoformat()
-                    } for row in latest_soil
-                }
+                'current': {}
             },
             'plant_heights': {
-                'current': {
-                    f'sector_{row["sector_id"]}': {
-                        'height_cm': float(row['height_cm']),
-                        'growth_stage': get_growth_stage(float(row['height_cm'])),
-                        'timestamp': row['timestamp'].isoformat()
-                    } for row in latest_plants
-                },
-                'trend_7d': [
-                    {
-                        'sector_id': row['sector_id'],
-                        'height_cm': float(row['height_cm']),
-                        'timestamp': row['timestamp'].isoformat()
-                    } for row in plant_trend
-                ]
+                'current': {},
+                'trend_7d': []
             },
             'leaf_count': {
-                'current': latest_leaf_count['leaf_count'] if latest_leaf_count else 0,
-                'timestamp': latest_leaf_count['timestamp'].isoformat() if latest_leaf_count else None
+                'current': 0,
+                'timestamp': None
             },
-            'environmental_trend': [
+            'environmental_trend': []
+        }
+        
+        # Get latest temperature and humidity with error handling
+        try:
+            cursor.execute("""
+                SELECT temperature, humidity, timestamp 
+                FROM ventilation 
+                ORDER BY timestamp DESC 
+                LIMIT 1
+            """)
+            latest_ventilation = cursor.fetchone()
+            logger.info(f"Latest ventilation data: {latest_ventilation}")
+            
+            if latest_ventilation:
+                dashboard_data['current_conditions'] = {
+                    'temperature': float(latest_ventilation['temperature']),
+                    'humidity': float(latest_ventilation['humidity']),
+                    'last_updated': latest_ventilation['timestamp'].isoformat()
+                }
+        except Exception as e:
+            logger.error(f"Error fetching ventilation data: {e}")
+        
+        # Get latest soil moisture per sector
+        try:
+            cursor.execute("""
+                SELECT sector_id, raw_value, soil_moisture, timestamp
+                FROM soil_health 
+                ORDER BY timestamp DESC
+            """)
+            all_soil = cursor.fetchall()
+            logger.info(f"All soil data count: {len(all_soil)}")
+            
+            # Get latest per sector
+            latest_soil_by_sector = {}
+            for row in all_soil:
+                sector_id = row['sector_id']
+                if sector_id not in latest_soil_by_sector:
+                    latest_soil_by_sector[sector_id] = row
+            
+            for sector_id, row in latest_soil_by_sector.items():
+                dashboard_data['soil_moisture']['current'][f'sector_{sector_id}'] = {
+                    'moisture_percent': row['soil_moisture'],
+                    'raw_value': row['raw_value'],
+                    'status': get_soil_status(row['soil_moisture']),
+                    'timestamp': row['timestamp'].isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"Error fetching soil data: {e}")
+        
+        # Get latest plant heights per sector
+        try:
+            cursor.execute("""
+                SELECT sector_id, height_cm, timestamp
+                FROM plant 
+                ORDER BY timestamp DESC
+            """)
+            all_plants = cursor.fetchall()
+            logger.info(f"All plant data count: {len(all_plants)}")
+            
+            # Get latest per sector
+            latest_plants_by_sector = {}
+            for row in all_plants:
+                sector_id = row['sector_id']
+                if sector_id not in latest_plants_by_sector:
+                    latest_plants_by_sector[sector_id] = row
+            
+            for sector_id, row in latest_plants_by_sector.items():
+                dashboard_data['plant_heights']['current'][f'sector_{sector_id}'] = {
+                    'height_cm': float(row['height_cm']),
+                    'growth_stage': get_growth_stage(float(row['height_cm'])),
+                    'timestamp': row['timestamp'].isoformat()
+                }
+            
+            # Get plant trend (last 7 days)
+            cursor.execute("""
+                SELECT sector_id, height_cm, timestamp
+                FROM plant 
+                WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                ORDER BY timestamp ASC
+            """)
+            plant_trend = cursor.fetchall()
+            
+            dashboard_data['plant_heights']['trend_7d'] = [
+                {
+                    'sector_id': row['sector_id'],
+                    'height_cm': float(row['height_cm']),
+                    'timestamp': row['timestamp'].isoformat()
+                } for row in plant_trend
+            ]
+            
+        except Exception as e:
+            logger.error(f"Error fetching plant data: {e}")
+        
+        # Get latest leaf count
+        try:
+            cursor.execute("""
+                SELECT leaf_count, timestamp 
+                FROM leaf_count 
+                ORDER BY timestamp DESC 
+                LIMIT 1
+            """)
+            latest_leaf_count = cursor.fetchone()
+            
+            if latest_leaf_count:
+                dashboard_data['leaf_count'] = {
+                    'current': latest_leaf_count['leaf_count'],
+                    'timestamp': latest_leaf_count['timestamp'].isoformat()
+                }
+        except Exception as e:
+            logger.error(f"Error fetching leaf count data: {e}")
+        
+        # Get temperature and humidity trend (simplified - last 24 readings)
+        try:
+            cursor.execute("""
+                SELECT temperature, humidity, timestamp
+                FROM ventilation 
+                ORDER BY timestamp DESC 
+                LIMIT 24
+            """)
+            temp_trend = cursor.fetchall()
+            
+            dashboard_data['environmental_trend'] = [
                 {
                     'temperature': round(float(row['temperature']), 1),
                     'humidity': round(float(row['humidity']), 1),
-                    'timestamp': row['hour_timestamp']
-                } for row in temp_trend
+                    'timestamp': row['timestamp'].isoformat()
+                } for row in reversed(temp_trend)  # Reverse to get chronological order
             ]
-        }
+            
+        except Exception as e:
+            logger.error(f"Error fetching environmental trend: {e}")
         
+        cursor.close()
+        conn.close()
+        
+        logger.info("Dashboard data fetch completed successfully")
         return jsonify(dashboard_data)
         
-    except Error as e:
-        print(f"Database error in dashboard-data: {e}")
-        return jsonify({'error': 'Database connection failed'}), 500
     except Exception as e:
-        print(f"General error in dashboard-data: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Major error in dashboard-data: {e}")
+        logger.error(traceback.format_exc())
+        
+        # Return minimal fallback data
+        fallback_data = {
+            'current_conditions': {
+                'temperature': 0,
+                'humidity': 0,
+                'last_updated': None
+            },
+            'soil_moisture': {'current': {}},
+            'plant_heights': {'current': {}, 'trend_7d': []},
+            'leaf_count': {'current': 0, 'timestamp': None},
+            'environmental_trend': [],
+            'error': str(e)
+        }
+        
+        return jsonify(fallback_data), 500
 
 @app.route('/api/alerts', methods=['GET'])
 def get_alerts():
     """Get system alerts based on current conditions"""
     try:
-        conn = mysql.connector.connect(**db_config)
+        conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         
         alerts = []
         
-        # Check for dry soil (moisture < 30%)
-        cursor.execute("""
-            SELECT DISTINCT s1.sector_id, s1.soil_moisture
-            FROM soil_health s1
-            INNER JOIN (
-                SELECT sector_id, MAX(timestamp) as max_timestamp
-                FROM soil_health
-                GROUP BY sector_id
-            ) s2 ON s1.sector_id = s2.sector_id AND s1.timestamp = s2.max_timestamp
-            WHERE s1.soil_moisture < 30
-        """)
-        dry_sectors = cursor.fetchall()
+        # Check for dry soil (moisture < 30%) - simplified query
+        try:
+            cursor.execute("""
+                SELECT sector_id, soil_moisture, timestamp
+                FROM soil_health 
+                ORDER BY timestamp DESC 
+                LIMIT 10
+            """)
+            recent_soil = cursor.fetchall()
+            
+            # Get latest per sector
+            latest_soil = {}
+            for row in recent_soil:
+                sector_id = row['sector_id']
+                if sector_id not in latest_soil:
+                    latest_soil[sector_id] = row
+            
+            for sector_id, data in latest_soil.items():
+                if data['soil_moisture'] < 30:
+                    alerts.append({
+                        'type': 'warning',
+                        'message': f'Sector {sector_id} soil moisture is low ({data["soil_moisture"]}%)',
+                        'action': 'water_needed',
+                        'sector_id': sector_id
+                    })
+                elif data['soil_moisture'] > 80:
+                    alerts.append({
+                        'type': 'info',
+                        'message': f'Sector {sector_id} soil moisture is very high ({data["soil_moisture"]}%)',
+                        'action': 'drainage_needed',
+                        'sector_id': sector_id
+                    })
+        except Exception as e:
+            logger.error(f"Error checking soil alerts: {e}")
         
-        for sector in dry_sectors:
-            alerts.append({
-                'type': 'warning',
-                'message': f'Sector {sector["sector_id"]} soil moisture is low ({sector["soil_moisture"]}%)',
-                'action': 'water_needed',
-                'sector_id': sector['sector_id']
-            })
-        
-        # Check for very wet soil (moisture > 80%)
-        cursor.execute("""
-            SELECT DISTINCT s1.sector_id, s1.soil_moisture
-            FROM soil_health s1
-            INNER JOIN (
-                SELECT sector_id, MAX(timestamp) as max_timestamp
-                FROM soil_health
-                GROUP BY sector_id
-            ) s2 ON s1.sector_id = s2.sector_id AND s1.timestamp = s2.max_timestamp
-            WHERE s1.soil_moisture > 80
-        """)
-        wet_sectors = cursor.fetchall()
-        
-        for sector in wet_sectors:
-            alerts.append({
-                'type': 'info',
-                'message': f'Sector {sector["sector_id"]} soil moisture is very high ({sector["soil_moisture"]}%)',
-                'action': 'drainage_needed',
-                'sector_id': sector['sector_id']
-            })
-        
-        # Check for high temperature (> 30°C)
-        cursor.execute("""
-            SELECT temperature FROM ventilation 
-            ORDER BY timestamp DESC 
-            LIMIT 1
-        """)
-        latest_temp = cursor.fetchone()
-        
-        if latest_temp and latest_temp['temperature'] > 30:
-            alerts.append({
-                'type': 'warning',
-                'message': f'High temperature detected ({latest_temp["temperature"]}°C)',
-                'action': 'fan_activation_recommended'
-            })
-        
-        # Check for low temperature (< 18°C)
-        if latest_temp and latest_temp['temperature'] < 18:
-            alerts.append({
-                'type': 'warning',
-                'message': f'Low temperature detected ({latest_temp["temperature"]}°C)',
-                'action': 'heating_recommended'
-            })
-        
-        # Check for no recent data (last reading > 1 hour ago)
-        cursor.execute("""
-            SELECT TIMESTAMPDIFF(MINUTE, MAX(timestamp), NOW()) as minutes_since_last
-            FROM ventilation
-        """)
-        last_reading = cursor.fetchone()
-        
-        if last_reading and last_reading['minutes_since_last'] > 60:
-            alerts.append({
-                'type': 'warning',
-                'message': f'No sensor data received for {last_reading["minutes_since_last"]} minutes',
-                'action': 'check_sensor_connectivity'
-            })
+        # Check for temperature alerts
+        try:
+            cursor.execute("""
+                SELECT temperature, timestamp
+                FROM ventilation 
+                ORDER BY timestamp DESC 
+                LIMIT 1
+            """)
+            latest_temp = cursor.fetchone()
+            
+            if latest_temp:
+                temp = float(latest_temp['temperature'])
+                if temp > 30:
+                    alerts.append({
+                        'type': 'warning',
+                        'message': f'High temperature detected ({temp}°C)',
+                        'action': 'fan_activation_recommended'
+                    })
+                elif temp < 18:
+                    alerts.append({
+                        'type': 'warning',
+                        'message': f'Low temperature detected ({temp}°C)',
+                        'action': 'heating_recommended'
+                    })
+        except Exception as e:
+            logger.error(f"Error checking temperature alerts: {e}")
         
         cursor.close()
         conn.close()
         
         return jsonify({'alerts': alerts, 'count': len(alerts)})
         
-    except Error as e:
-        print(f"Database error in alerts: {e}")
-        return jsonify({'alerts': [], 'count': 0})
     except Exception as e:
-        print(f"General error in alerts: {e}")
+        logger.error(f"Error in alerts: {e}")
         return jsonify({'alerts': [], 'count': 0})
 
 @app.route('/api/water-plants', methods=['POST'])
@@ -479,7 +592,7 @@ def water_plants():
             return jsonify({'error': 'Invalid sector (1-3) or duration (1-60 seconds)'}), 400
         
         # Log command to database
-        conn = mysql.connector.connect(**db_config)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         # Create control_commands table if it doesn't exist
@@ -489,8 +602,6 @@ def water_plants():
                 command_type VARCHAR(50) NOT NULL,
                 sector_id INT DEFAULT NULL,
                 duration INT DEFAULT NULL,
-                action VARCHAR(20) DEFAULT NULL,
-                brightness INT DEFAULT NULL,
                 timestamp DATETIME NOT NULL,
                 status VARCHAR(20) DEFAULT 'SUCCESS'
             )
@@ -508,8 +619,8 @@ def water_plants():
         cursor.close()
         conn.close()
         
-        # Here you would send the actual command to your Arduino
-        # For now, we'll simulate success
+        logger.info(f"Water command logged: Sector {sector}, Duration {duration}s")
+        
         return jsonify({
             'success': True,
             'message': f'Watering sector {sector} for {duration} seconds',
@@ -517,11 +628,8 @@ def water_plants():
             'duration': duration
         })
         
-    except Error as e:
-        print(f"Database error in water-plants: {e}")
-        return jsonify({'error': 'Database error'}), 500
     except Exception as e:
-        print(f"General error in water-plants: {e}")
+        logger.error(f"Error in water-plants: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/toggle-fan', methods=['POST'])
@@ -532,32 +640,27 @@ def toggle_fan():
         action = data.get('action', 'toggle')
         
         if action not in ['on', 'off', 'auto', 'toggle']:
-            return jsonify({'error': 'Invalid action. Use: on, off, auto, toggle'}), 400
+            return jsonify({'error': 'Invalid action'}), 400
         
-        # Log command to database
-        conn = mysql.connector.connect(**db_config)
+        # Log to database (simplified)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Create table if needed (same as above)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS control_commands (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 command_type VARCHAR(50) NOT NULL,
                 sector_id INT DEFAULT NULL,
                 duration INT DEFAULT NULL,
-                action VARCHAR(20) DEFAULT NULL,
-                brightness INT DEFAULT NULL,
                 timestamp DATETIME NOT NULL,
                 status VARCHAR(20) DEFAULT 'SUCCESS'
             )
         """)
         
-        insert_query = """
-            INSERT INTO control_commands (command_type, action, timestamp, status)
-            VALUES (%s, %s, %s, %s)
-        """
-        current_time = datetime.now()
-        cursor.execute(insert_query, ('FAN_CONTROL', action, current_time, 'SUCCESS'))
+        cursor.execute("""
+            INSERT INTO control_commands (command_type, timestamp, status)
+            VALUES (%s, %s, %s)
+        """, ('FAN_CONTROL', datetime.now(), 'SUCCESS'))
         
         conn.commit()
         cursor.close()
@@ -570,7 +673,7 @@ def toggle_fan():
         })
         
     except Exception as e:
-        print(f"Error in toggle-fan: {e}")
+        logger.error(f"Error in toggle-fan: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/toggle-lights', methods=['POST'])
@@ -581,14 +684,8 @@ def toggle_lights():
         action = data.get('action', 'toggle')
         brightness = data.get('brightness', 80)
         
-        if action not in ['on', 'off', 'auto', 'toggle']:
-            return jsonify({'error': 'Invalid action. Use: on, off, auto, toggle'}), 400
-        
-        if brightness < 0 or brightness > 100:
-            return jsonify({'error': 'Brightness must be between 0-100'}), 400
-        
-        # Log command to database
-        conn = mysql.connector.connect(**db_config)
+        # Log to database (simplified)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -597,19 +694,15 @@ def toggle_lights():
                 command_type VARCHAR(50) NOT NULL,
                 sector_id INT DEFAULT NULL,
                 duration INT DEFAULT NULL,
-                action VARCHAR(20) DEFAULT NULL,
-                brightness INT DEFAULT NULL,
                 timestamp DATETIME NOT NULL,
                 status VARCHAR(20) DEFAULT 'SUCCESS'
             )
         """)
         
-        insert_query = """
-            INSERT INTO control_commands (command_type, action, brightness, timestamp, status)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        current_time = datetime.now()
-        cursor.execute(insert_query, ('LIGHT_CONTROL', action, brightness, current_time, 'SUCCESS'))
+        cursor.execute("""
+            INSERT INTO control_commands (command_type, timestamp, status)
+            VALUES (%s, %s, %s)
+        """, ('LIGHT_CONTROL', datetime.now(), 'SUCCESS'))
         
         conn.commit()
         cursor.close()
@@ -623,8 +716,9 @@ def toggle_lights():
         })
         
     except Exception as e:
-        print(f"Error in toggle-lights: {e}")
+        logger.error(f"Error in toggle-lights: {e}")
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/statistics', methods=['GET'])
 def get_statistics():

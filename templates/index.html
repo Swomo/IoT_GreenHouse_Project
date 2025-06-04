@@ -563,12 +563,40 @@
 
         // Load dashboard data
         async function loadDashboardData() {
-            const response = await fetch('/api/dashboard-data');
-            dashboardData = await response.json();
-            
-            updateOverviewStats();
-            updateCharts();
-            updateSectorsGrid();
+            try {
+                const response = await fetch('/api/dashboard-data');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // Check if we got an error in the response
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                dashboardData = data;
+                
+                updateOverviewStats();
+                updateCharts();
+                updateSectorsGrid();
+            } catch (error) {
+                console.error('Error loading dashboard data:', error);
+                
+                // Set fallback data
+                dashboardData = {
+                    current_conditions: { temperature: 0, humidity: 0, last_updated: null },
+                    soil_moisture: { current: {} },
+                    plant_heights: { current: {}, trend_7d: [] },
+                    leaf_count: { current: 0, timestamp: null },
+                    environmental_trend: []
+                };
+                
+                updateOverviewStats();
+                throw error;
+            }
         }
 
         // Load alerts
@@ -580,27 +608,36 @@
 
         // Update overview statistics
         function updateOverviewStats() {
-            const conditions = dashboardData.current_conditions;
-            const soil = dashboardData.soil_moisture;
-            const leafData = dashboardData.leaf_count;
+            try {
+                const conditions = dashboardData.current_conditions || {};
+                const soil = dashboardData.soil_moisture || { current: {} };
+                const leafData = dashboardData.leaf_count || {};
 
-            // Temperature
-            document.getElementById('tempValue').textContent = `${conditions.temperature}°C`;
-            document.getElementById('tempTime').textContent = formatTime(conditions.last_updated);
+                // Temperature
+                document.getElementById('tempValue').textContent = `${conditions.temperature || '--'}°C`;
+                document.getElementById('tempTime').textContent = formatTime(conditions.last_updated);
 
-            // Humidity
-            document.getElementById('humidityValue').textContent = `${conditions.humidity}%`;
-            document.getElementById('humidityTime').textContent = formatTime(conditions.last_updated);
+                // Humidity
+                document.getElementById('humidityValue').textContent = `${conditions.humidity || '--'}%`;
+                document.getElementById('humidityTime').textContent = formatTime(conditions.last_updated);
 
-            // Average soil moisture
-            const soilValues = Object.values(soil.current).map(s => s.moisture_percent);
-            const avgSoil = soilValues.length > 0 ? Math.round(soilValues.reduce((a, b) => a + b, 0) / soilValues.length) : 0;
-            document.getElementById('soilValue').textContent = `${avgSoil}%`;
-            document.getElementById('soilStatus').textContent = getSoilStatus(avgSoil);
+                // Average soil moisture
+                const soilValues = Object.values(soil.current || {}).map(s => s.moisture_percent).filter(v => v !== undefined);
+                const avgSoil = soilValues.length > 0 ? Math.round(soilValues.reduce((a, b) => a + b, 0) / soilValues.length) : 0;
+                document.getElementById('soilValue').textContent = `${avgSoil}%`;
+                document.getElementById('soilStatus').textContent = getSoilStatus(avgSoil);
 
-            // Leaf count
-            document.getElementById('leafValue').textContent = leafData.current || '--';
-            document.getElementById('leafTime').textContent = formatTime(leafData.timestamp);
+                // Leaf count
+                document.getElementById('leafValue').textContent = leafData.current || '--';
+                document.getElementById('leafTime').textContent = formatTime(leafData.timestamp);
+            } catch (error) {
+                console.error('Error updating overview stats:', error);
+                // Set fallback values
+                document.getElementById('tempValue').textContent = '--°C';
+                document.getElementById('humidityValue').textContent = '--%';
+                document.getElementById('soilValue').textContent = '--%';
+                document.getElementById('leafValue').textContent = '--';
+            }
         }
 
         // Update charts with new data
