@@ -1,9 +1,15 @@
 /*
- * IoT Greenhouse - Node 3: Light & Growth Monitoring System (3 Plants)
- * SIMPLIFIED CONTINUOUS MONITORING VERSION
+ * IoT Greenhouse - Node 3: Enhanced Light & Growth System with Command Interface
  * 
  * This system continuously monitors plant heights and ambient light.
- * If dark for 30 seconds, all LEDs turn on automatically.
+ * 
+ * NEW: Accepts commands from Raspberry Pi for manual light control
+ * 
+ * Commands accepted:
+ * - LIGHTS_ON_80     (turn lights on at 80% brightness)
+ * - LIGHTS_OFF_0     (turn lights off)
+ * - LIGHTS_AUTO_80   (return to automatic mode with 80% brightness)
+ * - STATUS           (report current status)
  * 
  * Hardware Requirements:
  * - Arduino Uno
@@ -11,9 +17,6 @@
  * - 1x LDR with 10kΩ resistor (ambient light sensing)
  * - 3x LEDs (grow lights for each plant)
  * - 3x 220Ω resistors for LEDs
- * 
- * Author: IoT Greenhouse Team - Node 3 (Simplified)
- * Date: 2025
  */
 
 // Pin Definitions
@@ -30,9 +33,8 @@
 
 // Thresholds - Updated for your LDR readings
 #define LIGHT_THRESHOLD 30      // Above this = bright, below = dark
-#define LED_BRIGHTNESS 200      // LED brightness when on (0-255)
-//#define DARK_DELAY 5000       // 5 second dark delay for testing
-#define DARK_DELAY 5000        // 30 seconds in milliseconds in practice, 5 seconds for testing purposes
+#define DEFAULT_LED_BRIGHTNESS 200  // Default LED brightness when on (0-255)
+#define DARK_DELAY 5000        // 5 seconds for testing, 30 seconds in practice
 #define SENSOR_HEIGHT 50.0      // Height of sensors from ground (cm)
 #define POT_HEIGHT 10.0         // Height of plant pots (cm)
 
@@ -52,11 +54,22 @@ unsigned long darkStartTime = 0;
 bool isDark = false;
 bool darkTimerStarted = false;
 
+// NEW: Manual control variables
+enum LightControlMode {
+  AUTO_MODE,
+  MANUAL_ON,
+  MANUAL_OFF
+};
+
+LightControlMode currentLightMode = AUTO_MODE;
+int manualBrightness = DEFAULT_LED_BRIGHTNESS;
+int currentBrightness = DEFAULT_LED_BRIGHTNESS;
+
 void setup() {
   Serial.begin(9600);
-  Serial.println(F("=== IoT Greenhouse Node 3 - Continuous Monitor ==="));
-  Serial.println(F("Monitoring 3 plants with automatic lighting"));
-  Serial.println(F("LEDs activate after 30 seconds of darkness"));
+  Serial.println(F("=== IoT Greenhouse Node 3: Enhanced Light & Growth System ==="));
+  Serial.println(F("Command Interface Ready - Listening for Pi commands"));
+  Serial.println(F("Monitoring 3 plants with automatic/manual lighting"));
   Serial.println();
   
   // Initialize pins
@@ -71,25 +84,30 @@ void setup() {
   pinMode(LED_3, OUTPUT);
   
   // Turn off LEDs initially
-  analogWrite(LED_1, 0);
-  analogWrite(LED_2, 0);
-  analogWrite(LED_3, 0);
+  setAllLEDs(0);
   
   Serial.println(F("System initialized - Starting continuous monitoring..."));
   Serial.println(F("Light threshold: < 30 = dark"));
-  Serial.println(F("Expected readings: Lit room ~50, Covered ~10-15, Flashlight ~100-240"));
-  Serial.println(F("Dark delay: 30 seconds"));
-  Serial.println(F("LED brightness: 200/255"));
+  Serial.println(F("Dark delay: 5 seconds (testing)"));
+  Serial.println(F(">>> SYSTEM_READY"));
   Serial.println();
 }
 
 void loop() {
   unsigned long currentTime = millis();
   
+  // Handle commands from Raspberry Pi (NEW)
+  handleSerialCommands();
+  
   // Read sensors every 2 seconds
   if (currentTime - lastSensorRead >= SENSOR_READ_INTERVAL) {
     readAllSensors();
-    checkLightConditions();
+    
+    // Only check automatic light conditions if in AUTO mode (MODIFIED)
+    if (currentLightMode == AUTO_MODE) {
+      checkLightConditions();
+    }
+    
     lastSensorRead = currentTime;
   }
   
@@ -100,6 +118,119 @@ void loop() {
   }
   
   delay(100); // Small delay for stability
+}
+
+// NEW: Handle commands from Raspberry Pi
+void handleSerialCommands() {
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    
+    if (command.length() == 0) return;
+    
+    // Parse light commands: LIGHTS_ACTION_BRIGHTNESS
+    if (command.startsWith("LIGHTS_")) {
+      parseLightCommand(command);
+    }
+    else if (command == "STATUS") {
+      reportDetailedStatus();
+    }
+    else {
+      Serial.println(">>> UNKNOWN_COMMAND: " + command);
+    }
+  }
+}
+
+// NEW: Parse light command from Pi
+void parseLightCommand(String command) {
+  // Parse: LIGHTS_ON_80, LIGHTS_OFF_0, LIGHTS_AUTO_90
+  int firstUnderscore = command.indexOf('_', 7);  // After "LIGHTS_"
+  int secondUnderscore = command.indexOf('_', firstUnderscore + 1);
+  
+  if (firstUnderscore > 0 && secondUnderscore > 0) {
+    String action = command.substring(7, firstUnderscore);
+    int brightness = command.substring(secondUnderscore + 1).toInt();
+    
+    // Validate brightness (0-100%)
+    brightness = constrain(brightness, 0, 100);
+    
+    if (action == "ON") {
+      setManualLightControl(MANUAL_ON, brightness);
+      Serial.println(">>> LIGHTS_MANUAL_ON: " + String(brightness) + "%");
+    }
+    else if (action == "OFF") {
+      setManualLightControl(MANUAL_OFF, 0);
+      Serial.println(">>> LIGHTS_MANUAL_OFF");
+    }
+    else if (action == "AUTO") {
+      manualBrightness = map(brightness, 0, 100, 0, 255);  // Store preferred brightness
+      setManualLightControl(AUTO_MODE, brightness);
+      Serial.println(">>> LIGHTS_AUTO_MODE: " + String(brightness) + "%");
+    }
+    else {
+      Serial.println(">>> INVALID_ACTION: Use ON, OFF, or AUTO");
+    }
+  } else {
+    Serial.println(">>> COMMAND_FORMAT_ERROR: Use LIGHTS_ACTION_BRIGHTNESS");
+  }
+}
+
+// NEW: Set manual light control mode
+void setManualLightControl(LightControlMode mode, int brightnessPercent) {
+  currentLightMode = mode;
+  
+  switch (mode) {
+    case MANUAL_ON:
+      currentBrightness = map(brightnessPercent, 0, 100, 0, 255);
+      setAllLEDs(currentBrightness);
+      ledsOn = true;
+      Serial.println(">>> LIGHTS_FORCED_ON: " + String(brightnessPercent) + "%");
+      break;
+      
+    case MANUAL_OFF:
+      setAllLEDs(0);
+      ledsOn = false;
+      Serial.println(">>> LIGHTS_FORCED_OFF");
+      break;
+      
+    case AUTO_MODE:
+      Serial.println(">>> LIGHTS_AUTO_MODE_ACTIVE: " + String(brightnessPercent) + "%");
+      // Light control will be handled by checkLightConditions()
+      break;
+  }
+}
+
+// NEW: Set all LEDs to specified brightness
+void setAllLEDs(int brightness) {
+  analogWrite(LED_1, brightness);
+  analogWrite(LED_2, brightness);
+  analogWrite(LED_3, brightness);
+}
+
+// NEW: Detailed status report for Pi
+void reportDetailedStatus() {
+  Serial.println(">>> STATUS_REPORT_START");
+  Serial.println(">>> LIGHT_MODE: " + getModeString(currentLightMode));
+  Serial.println(">>> LEDS_STATUS: " + String(ledsOn ? "ON" : "OFF"));
+  Serial.println(">>> LIGHT_LEVEL: " + String(lightLevel));
+  Serial.println(">>> LED_BRIGHTNESS: " + String((currentBrightness * 100) / 255) + "%");
+  
+  // Plant heights
+  for (int i = 0; i < 3; i++) {
+    Serial.println(">>> PLANT_" + String(i+1) + "_HEIGHT: " + String(plantHeight[i]));
+  }
+  
+  Serial.println(">>> LIGHT_THRESHOLD: " + String(LIGHT_THRESHOLD));
+  Serial.println(">>> STATUS_REPORT_END");
+}
+
+String getModeString(LightControlMode mode) {
+  switch (mode) {
+    case AUTO_MODE: return "AUTO";
+    case MANUAL_ON: return "MANUAL_ON";
+    case MANUAL_OFF: return "MANUAL_OFF";
+    default: return "UNKNOWN";
+  }
 }
 
 void readAllSensors() {
@@ -151,18 +282,16 @@ void checkLightConditions() {
       isDark = true;
       darkTimerStarted = true;
       darkStartTime = currentTime;
-      Serial.print(F(">>> DARK DETECTED (Light: "));
+      Serial.print(F(">>> DARK_DETECTED (Light: "));
       Serial.print(lightLevel);
-      Serial.println(F(") - Starting 30 second timer..."));
+      Serial.println(F(") - Starting timer..."));
     } else if (darkTimerStarted) {
-      // Still dark - check if 30 seconds have passed
+      // Still dark - check if delay time has passed
       if (currentTime - darkStartTime >= DARK_DELAY) {
-        // 30 seconds of darkness - turn on LEDs
+        // Dark delay elapsed - turn on LEDs
         if (!ledsOn) {
           turnOnLEDs();
         }
-        // Keep timer active - don't set darkTimerStarted = false
-        // This allows LEDs to stay on while it remains dark
       }
     }
   } else {
@@ -174,7 +303,7 @@ void checkLightConditions() {
       if (ledsOn) {
         turnOffLEDs();
       }
-      Serial.print(F(">>> LIGHT DETECTED (Light: "));
+      Serial.print(F(">>> LIGHT_DETECTED (Light: "));
       Serial.print(lightLevel);
       Serial.println(F(") - LEDs turning off"));
     }
@@ -182,24 +311,21 @@ void checkLightConditions() {
 }
 
 void turnOnLEDs() {
-  analogWrite(LED_1, LED_BRIGHTNESS);
-  analogWrite(LED_2, LED_BRIGHTNESS);
-  analogWrite(LED_3, LED_BRIGHTNESS);
+  setAllLEDs(manualBrightness > 0 ? manualBrightness : DEFAULT_LED_BRIGHTNESS);
+  currentBrightness = manualBrightness > 0 ? manualBrightness : DEFAULT_LED_BRIGHTNESS;
   ledsOn = true;
   
-  Serial.println(F(">>> ALL LEDs ACTIVATED - 30 seconds of darkness elapsed"));
+  Serial.println(F(">>> AUTO_LIGHTS_ON - Dark delay elapsed"));
   Serial.print(F("    LED Brightness: "));
-  Serial.print((LED_BRIGHTNESS * 100) / 255);
+  Serial.print((currentBrightness * 100) / 255);
   Serial.println(F("%"));
 }
 
 void turnOffLEDs() {
-  analogWrite(LED_1, 0);
-  analogWrite(LED_2, 0);
-  analogWrite(LED_3, 0);
+  setAllLEDs(0);
   ledsOn = false;
   
-  Serial.println(F(">>> ALL LEDs DEACTIVATED - Light detected"));
+  Serial.println(F(">>> AUTO_LIGHTS_OFF - Light detected"));
 }
 
 void displayStatus() {
@@ -209,12 +335,14 @@ void displayStatus() {
   
   if (lightLevel < LIGHT_THRESHOLD) {
     Serial.print(F(" (DARK)"));
-    if (darkTimerStarted) {
+    if (darkTimerStarted && currentLightMode == AUTO_MODE) {
       unsigned long timeInDark = millis() - darkStartTime;
       unsigned long remaining = DARK_DELAY - timeInDark;
-      Serial.print(F(" - Timer: "));
-      Serial.print(remaining / 1000);
-      Serial.print(F("s remaining"));
+      if (remaining > 0) {
+        Serial.print(F(" - Timer: "));
+        Serial.print(remaining / 1000);
+        Serial.print(F("s remaining"));
+      }
     }
   } else {
     Serial.print(F(" (BRIGHT)"));
@@ -225,9 +353,12 @@ void displayStatus() {
   
   if (ledsOn) {
     Serial.print(F(" ("));
-    Serial.print((LED_BRIGHTNESS * 100) / 255);
+    Serial.print((currentBrightness * 100) / 255);
     Serial.print(F("%)"));
   }
+  
+  Serial.print(F(" | Mode: "));
+  Serial.print(getModeString(currentLightMode));
   
   Serial.println();
   
@@ -260,45 +391,4 @@ void displayStatus() {
   
   Serial.println();
   Serial.println(F("----------------------------------------"));
-}
-
-// Optional: Add a simple command to manually test LEDs
-void checkSerialCommands() {
-  if (Serial.available()) {
-    char command = Serial.read();
-    
-    switch (command) {
-      case 't':
-      case 'T':
-        // Test LEDs manually
-        Serial.println(F("Manual LED test..."));
-        analogWrite(LED_1, 255);
-        analogWrite(LED_2, 255);
-        analogWrite(LED_3, 255);
-        delay(2000);
-        analogWrite(LED_1, 0);
-        analogWrite(LED_2, 0);
-        analogWrite(LED_3, 0);
-        Serial.println(F("LED test complete"));
-        break;
-        
-      case 's':
-      case 'S':
-        // Show current sensor readings
-        Serial.println(F("=== SENSOR READINGS ==="));
-        Serial.print(F("Raw light value: "));
-        Serial.println(lightLevel);
-        for (byte i = 0; i < 3; i++) {
-          Serial.print(F("Plant "));
-          Serial.print(i + 1);
-          Serial.print(F(" height: "));
-          Serial.println(plantHeight[i]);
-        }
-        Serial.println(F("====================="));
-        break;
-    }
-    
-    // Clear remaining characters
-    while (Serial.available()) Serial.read();
-  }
 }

@@ -1,24 +1,24 @@
 /*
- * IoT Greenhouse - Node 1: Soil Health Monitoring and Watering System
+ * IoT Greenhouse - Node 1: Enhanced Soil Health System with Command Interface
  * 
  * This system monitors 3 soil moisture sensors and automatically controls
  * a servo motor to direct water flow to the section that needs it most.
+ * 
+ * NEW: Accepts commands from Raspberry Pi for manual watering control
+ * 
+ * Commands accepted:
+ * - WATER_SECTOR_1_15  (water sector 1 for 15 seconds)
+ * - WATER_SECTOR_2_10  (water sector 2 for 10 seconds) 
+ * - WATER_SECTOR_3_20  (water sector 3 for 20 seconds)
+ * - STOP_MANUAL        (stop any manual watering)
+ * - STATUS             (report current status)
  * 
  * Hardware Requirements:
  * - Arduino Uno/Nano
  * - 3x Soil Moisture Sensors
  * - 1x Servo Motor (SG90 or similar) - represents water flow direction control
  * - 1x LED (status indicator)
- * 
- * Soil Moisture Value Ranges (Verified):
- * 700 - 1023: VERY DRY (little to no moisture) - NEEDS WATER
- * 300 - 700:  MOIST/OPTIMAL (good growing conditions) - STOP WATERING
- * 0 - 300:    VERY WET (too much water) - DRAINAGE NEEDED
- * 
- * Author: IoT Greenhouse Team
- * Date: 2025
  */
-
 
 #include <Servo.h>
 
@@ -33,32 +33,24 @@ const int LED_PIN = 13;
 Servo waterDirectionServo;
 
 // Servo positions
-const int SERVO_10_OCLOCK = 60;
-const int SERVO_12_OCLOCK = 90;
-const int SERVO_2_OCLOCK = 120;
-const int SERVO_4_OCLOCK = 150;
-const int SERVO_6_OCLOCK = 180;
-const int SERVO_8_OCLOCK = 30;
-const int SERVO_7_OCLOCK = 210;
+const int SERVO_10_OCLOCK = 60;   // Sector 1
+const int SERVO_2_OCLOCK = 120;   // Sector 2
+const int SERVO_6_OCLOCK = 180;   // Sector 3
 const int SERVO_NEUTRAL = 0;
 
 // Thresholds
 const int DRY_THRESHOLD = 700;
 const int WET_THRESHOLD = 300;
-const int OPTIMAL_RANGE_LOW = 300;
-const int OPTIMAL_RANGE_HIGH = 700;
 
 // Timing
 unsigned long lastReading = 0;
-unsigned long lastWatering = 0;
 const unsigned long READING_INTERVAL = 5000;
-const unsigned long WATERING_DURATION = 10000;
-const unsigned long WATERING_COOLDOWN = 30000;
 
 // System state
 enum SystemState {
   MONITORING,
   WATERING,
+  MANUAL_WATERING,
   DRAINING,
   ALL_DRY,
   ALL_OVERWATERED,
@@ -68,9 +60,12 @@ enum SystemState {
 SystemState currentState = MONITORING;
 bool systemActive = true;
 int soilValues[3] = {0, 0, 0};
-unsigned long oscillateStartTime = 0;
-bool oscillateDirection = true;
-int oscillatePosition = 90;
+
+// Manual watering control (NEW)
+bool manualWateringActive = false;
+unsigned long manualWateringStart = 0;
+int manualWateringDuration = 0;
+int manualWateringSector = 0;
 
 // Growth tracking
 int plantGrowthCounter = 0;
@@ -78,7 +73,8 @@ const int GROWTH_THRESHOLD = 100;
 
 void setup() {
   Serial.begin(9600);
-  Serial.println("=== IoT Greenhouse Node 1: Soil Health System ===");
+  Serial.println("=== IoT Greenhouse Node 1: Enhanced Soil Health System ===");
+  Serial.println("Command Interface Ready - Listening for Pi commands");
 
   pinMode(LED_PIN, OUTPUT);
   waterDirectionServo.attach(SERVO_PIN);
@@ -86,14 +82,23 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
 
   delay(2000);
+  Serial.println(">>> SYSTEM_READY");
 }
 
 void loop() {
+  // Handle commands from Raspberry Pi (NEW)
+  handleSerialCommands();
+  
+  // Check manual watering timeout (NEW)
+  checkManualWatering();
+  
+  // Regular sensor reading and automation
   if (millis() - lastReading >= READING_INTERVAL) {
     readSoilSensors();
     displaySensorReadings();
 
-    if (systemActive) {
+    // Only run automatic control if not in manual mode (MODIFIED)
+    if (systemActive && !manualWateringActive) {
       SystemState newState = determineSystemState();
       if (newState != currentState) {
         currentState = newState;
@@ -109,10 +114,142 @@ void loop() {
     plantGrowthCounter++;
   }
 
-  handleSystemState();
-  handleSerialCommands();
   updateStatusLED();
   delay(100);
+}
+
+// NEW: Handle commands from Raspberry Pi
+void handleSerialCommands() {
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    
+    if (command.length() == 0) return;
+    
+    // Parse watering commands: WATER_SECTOR_X_Y
+    if (command.startsWith("WATER_SECTOR_")) {
+      parseWateringCommand(command);
+    }
+    // Stop manual watering
+    else if (command == "STOP_MANUAL") {
+      stopManualWatering();
+      Serial.println(">>> MANUAL_WATERING_STOPPED");
+    }
+    // Status request
+    else if (command == "STATUS") {
+      reportDetailedStatus();
+    }
+    // Legacy commands
+    else if (command == "RESET") {
+      currentState = MONITORING;
+      waterDirectionServo.write(SERVO_NEUTRAL);
+      manualWateringActive = false;
+      Serial.println(">>> SYSTEM_RESET");
+    } else if (command == "OFF") {
+      systemActive = false;
+      Serial.println(">>> SYSTEM_DISABLED");
+    } else if (command == "ON") {
+      systemActive = true;
+      Serial.println(">>> SYSTEM_ENABLED");
+    } else {
+      Serial.println(">>> UNKNOWN_COMMAND: " + command);
+    }
+  }
+}
+
+// NEW: Parse watering command from Pi
+void parseWateringCommand(String command) {
+  // Parse: WATER_SECTOR_1_15
+  int firstUnderscore = command.indexOf('_', 13);  // After "WATER_SECTOR_"
+  int secondUnderscore = command.indexOf('_', firstUnderscore + 1);
+  
+  if (firstUnderscore > 0 && secondUnderscore > 0) {
+    int sector = command.substring(13, firstUnderscore).toInt();
+    int duration = command.substring(secondUnderscore + 1).toInt();
+    
+    if (sector >= 1 && sector <= 3 && duration > 0 && duration <= 60) {
+      startManualWatering(sector, duration);
+      Serial.println(">>> MANUAL_WATERING_STARTED: Sector " + String(sector) + " for " + String(duration) + "s");
+    } else {
+      Serial.println(">>> INVALID_PARAMETERS: Sector must be 1-3, Duration 1-60s");
+    }
+  } else {
+    Serial.println(">>> COMMAND_FORMAT_ERROR: Use WATER_SECTOR_X_Y");
+  }
+}
+
+// NEW: Start manual watering
+void startManualWatering(int sector, int duration) {
+  // Stop any current automation
+  manualWateringActive = true;
+  manualWateringSector = sector;
+  manualWateringDuration = duration;
+  manualWateringStart = millis();
+  currentState = MANUAL_WATERING;
+  
+  // Position servo for the specified sector
+  int servoPosition = SERVO_NEUTRAL;
+  switch (sector) {
+    case 1: servoPosition = SERVO_10_OCLOCK; break;
+    case 2: servoPosition = SERVO_2_OCLOCK; break;
+    case 3: servoPosition = SERVO_6_OCLOCK; break;
+  }
+  
+  waterDirectionServo.write(servoPosition);
+  digitalWrite(LED_PIN, HIGH);
+  
+  Serial.println(">>> SERVO_POSITION: " + String(servoPosition) + " degrees");
+}
+
+// NEW: Check manual watering timeout
+void checkManualWatering() {
+  if (manualWateringActive) {
+    unsigned long elapsed = millis() - manualWateringStart;
+    
+    if (elapsed >= (manualWateringDuration * 1000)) {
+      stopManualWatering();
+      Serial.println(">>> MANUAL_WATERING_COMPLETED");
+    }
+  }
+}
+
+// NEW: Stop manual watering
+void stopManualWatering() {
+  manualWateringActive = false;
+  waterDirectionServo.write(SERVO_NEUTRAL);
+  digitalWrite(LED_PIN, LOW);
+  currentState = MONITORING;
+  
+  Serial.println(">>> SERVO_POSITION: 0 degrees (NEUTRAL)");
+}
+
+// NEW: Detailed status report for Pi
+void reportDetailedStatus() {
+  Serial.println(">>> STATUS_REPORT_START");
+  Serial.println(">>> SYSTEM_STATE: " + getStateString(currentState));
+  Serial.println(">>> MANUAL_ACTIVE: " + String(manualWateringActive ? "true" : "false"));
+  
+  if (manualWateringActive) {
+    unsigned long remaining = (manualWateringDuration * 1000) - (millis() - manualWateringStart);
+    Serial.println(">>> MANUAL_REMAINING: " + String(remaining / 1000) + "s");
+    Serial.println(">>> MANUAL_SECTOR: " + String(manualWateringSector));
+  }
+  
+  Serial.println(">>> SOIL_VALUES: " + String(soilValues[0]) + "," + String(soilValues[1]) + "," + String(soilValues[2]));
+  Serial.println(">>> STATUS_REPORT_END");
+}
+
+String getStateString(SystemState state) {
+  switch (state) {
+    case MONITORING: return "MONITORING";
+    case WATERING: return "WATERING";
+    case MANUAL_WATERING: return "MANUAL_WATERING";
+    case DRAINING: return "DRAINING";
+    case ALL_DRY: return "ALL_DRY";
+    case ALL_OVERWATERED: return "ALL_OVERWATERED";
+    case OSCILLATING: return "OSCILLATING";
+    default: return "UNKNOWN";
+  }
 }
 
 void readSoilSensors() {
@@ -150,58 +287,34 @@ void controlServo() {
 
   switch (currentState) {
     case ALL_DRY:
-      Serial.println(">>> ALL DRY - ROTATING TO EACH SENSOR");
+      Serial.println(">>> ALL DRY - AUTO WATERING CYCLE");
       waterDirectionServo.write(SERVO_10_OCLOCK);
-      Serial.println(">>> A is DRY - 10 O'CLOCK");
       delay(3000);
       waterDirectionServo.write(SERVO_2_OCLOCK);
-      Serial.println(">>> B is DRY - 2 O'CLOCK");
       delay(3000);
       waterDirectionServo.write(SERVO_6_OCLOCK);
-      Serial.println(">>> C is DRY - 6 O'CLOCK");
       delay(3000);
       waterDirectionServo.write(SERVO_NEUTRAL);
-      Serial.println(">>> ALL DRY - DONE CYCLE, RETURNING TO NEUTRAL");
-      return;
-
-    case ALL_OVERWATERED:
-      currentState = OSCILLATING;
-      oscillateStartTime = millis();
-      oscillatePosition = 90;
-      action = "ALL OVERWATERED - STARTING OSCILLATION";
-      Serial.println(">>> " + action);
+      Serial.println(">>> AUTO_WATERING_CYCLE_COMPLETE");
       return;
 
     case WATERING:
       if (soilValues[0] > DRY_THRESHOLD) {
         targetPosition = SERVO_10_OCLOCK;
-        action = "SENSOR 1 DRY - 10 O'CLOCK";
+        action = "AUTO_WATERING_SECTOR_1";
       } else if (soilValues[1] > DRY_THRESHOLD) {
         targetPosition = SERVO_2_OCLOCK;
-        action = "SENSOR 2 DRY - 2 O'CLOCK";
+        action = "AUTO_WATERING_SECTOR_2";
       } else if (soilValues[2] > DRY_THRESHOLD) {
         targetPosition = SERVO_6_OCLOCK;
-        action = "SENSOR 3 DRY - 6 O'CLOCK";
-      }
-      break;
-
-    case DRAINING:
-      if (soilValues[0] < WET_THRESHOLD) {
-        targetPosition = SERVO_4_OCLOCK;
-        action = "SENSOR 1 OVERWATERED - 4 O'CLOCK (150°)";
-      } else if (soilValues[1] < WET_THRESHOLD) {
-        targetPosition = SERVO_8_OCLOCK;
-        action = "SENSOR 2 OVERWATERED - 8 O'CLOCK (30°)";
-      } else if (soilValues[2] < WET_THRESHOLD) {
-        targetPosition = SERVO_7_OCLOCK;
-        action = "SENSOR 3 OVERWATERED - 7 O'CLOCK (210°)";
+        action = "AUTO_WATERING_SECTOR_3";
       }
       break;
 
     case MONITORING:
     default:
       targetPosition = SERVO_NEUTRAL;
-      action = "ALL OPTIMAL - NEUTRAL (0°)";
+      action = "MONITORING";
       break;
   }
 
@@ -210,7 +323,10 @@ void controlServo() {
 }
 
 void handleOscillation() {
+  // Simplified oscillation handling
   static unsigned long lastOscillateUpdate = 0;
+  static int oscillatePosition = 90;
+  static bool oscillateDirection = true;
 
   if (millis() - lastOscillateUpdate > 1000) {
     if (oscillateDirection) {
@@ -228,20 +344,8 @@ void handleOscillation() {
     }
 
     waterDirectionServo.write(oscillatePosition);
-    Serial.print(">>> OSCILLATING - Position: ");
-    Serial.print(oscillatePosition);
-    Serial.println("°");
     lastOscillateUpdate = millis();
   }
-
-  if (!(soilValues[0] < WET_THRESHOLD && soilValues[1] < WET_THRESHOLD && soilValues[2] < WET_THRESHOLD)) {
-    currentState = MONITORING;
-    Serial.println(">>> OSCILLATION STOPPED - Sensors improved");
-  }
-}
-
-void handleSystemState() {
-  // Optional additional logic
 }
 
 void displaySensorReadings() {
@@ -255,12 +359,13 @@ void displaySensorReadings() {
   Serial.print(soilValues[2]);
   printMoistureStatus(soilValues[2]);
   Serial.print(" | State: ");
-  printSystemState();
-
-  if (plantGrowthCounter >= GROWTH_THRESHOLD) {
-    Serial.print(" | Growth Cycle: ");
-    Serial.print(plantGrowthCounter / GROWTH_THRESHOLD);
+  Serial.print(getStateString(currentState));
+  
+  if (manualWateringActive) {
+    unsigned long remaining = (manualWateringDuration * 1000) - (millis() - manualWateringStart);
+    Serial.print(" | Manual: " + String(remaining / 1000) + "s");
   }
+  
   Serial.println();
 }
 
@@ -274,41 +379,19 @@ void printMoistureStatus(int value) {
   }
 }
 
-void printSystemState() {
-  switch (currentState) {
-    case MONITORING: Serial.print("MONITORING"); break;
-    case WATERING: Serial.print("WATERING"); break;
-    case DRAINING: Serial.print("DRAINING"); break;
-    case ALL_DRY: Serial.print("ALL DRY"); break;
-    case ALL_OVERWATERED: Serial.print("ALL OVERWATERED"); break;
-    case OSCILLATING: Serial.print("OSCILLATING"); break;
-    default: Serial.print("UNKNOWN"); break;
-  }
-}
-
 void updateStatusLED() {
-  digitalWrite(LED_PIN, (currentState != MONITORING));
-}
-
-void handleSerialCommands() {
-  if (Serial.available()) {
-    String command = Serial.readStringUntil('\n');
-    command.trim();
-
-    if (command == "STATUS") {
-      displaySensorReadings();
-    } else if (command == "RESET") {
-      currentState = MONITORING;
-      waterDirectionServo.write(SERVO_NEUTRAL);
-      Serial.println(">>> SYSTEM RESET");
-    } else if (command == "OFF") {
-      systemActive = false;
-      Serial.println(">>> SYSTEM DISABLED");
-    } else if (command == "ON") {
-      systemActive = true;
-      Serial.println(">>> SYSTEM ENABLED");
-    } else {
-      Serial.println(">>> UNKNOWN COMMAND");
-    }
+  // LED behavior based on state
+  if (manualWateringActive) {
+    // Fast blink during manual watering
+    digitalWrite(LED_PIN, (millis() / 250) % 2);
+  } else if (currentState == WATERING) {
+    // Slow blink during auto watering
+    digitalWrite(LED_PIN, (millis() / 500) % 2);
+  } else if (currentState != MONITORING) {
+    // Solid on for other states
+    digitalWrite(LED_PIN, HIGH);
+  } else {
+    // Off when monitoring
+    digitalWrite(LED_PIN, LOW);
   }
 }
