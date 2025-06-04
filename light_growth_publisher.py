@@ -15,7 +15,7 @@ Hardware:
 - Connected via USB to Raspberry Pi
 
 Arduino Output Format:
-"Light: 25 (DARK) | LEDs: ON (78%)"
+"Light: 25 (DARK) - Timer: 15s remaining | LEDs: OFF"
 "Plant 1: 12.5 cm (Vegetative) | Plant 2: 8.2 cm (Seedling) | Plant 3: 18.7 cm (Mature)"
 "----------------------------------------"
 """
@@ -48,9 +48,8 @@ class LightGrowthNodePublisher:
     def __init__(self):
         self.serial_connection = None
         self.mqtt_client = None
-        self.light_data = {}
-        self.plant_data = {}
-        self.data_complete = False
+        self.light_data = None
+        self.plant_data = None
         self.setup_serial()
         self.setup_mqtt()
         
@@ -92,37 +91,122 @@ class LightGrowthNodePublisher:
             logger.error(f"Failed to setup MQTT connection: {e}")
             raise
     
+    def parse_arduino_output(self, line):
+        """
+        Parse Arduino serial output and extract light and plant data
+        """
+        try:
+            line = line.strip()
+            
+            # Skip empty lines, startup messages, and debug info
+            if not line or "===" in line or "Monitoring" in line or "System initialized" in line:
+                return None
+            
+            # Parse light sensor data
+            # Format: "Light: 25 (DARK) - Timer: 15s remaining | LEDs: OFF"
+            # Format: "Light: 25 (DARK) | LEDs: ON (78%)"
+            # Format: "Light: 50 (BRIGHT) | LEDs: OFF"
+            if line.startswith("Light:"):
+                logger.debug(f"Parsing light line: {line}")
+                self.light_data = self.parse_light_line(line)
+                return None
+            
+            # Parse plant height data
+            # Format: "Plant 1: 12.5 cm (Vegetative) | Plant 2: 8.2 cm (Seedling) | Plant 3: 18.7 cm (Mature)"
+            elif line.startswith("Plant"):
+                logger.debug(f"Parsing plant line: {line}")
+                self.plant_data = self.parse_plant_line(line)
+                return None
+            
+            # Check for separator - triggers data publishing
+            elif line.startswith("---"):
+                logger.debug("Found separator, checking if we have complete data")
+                if self.light_data and self.plant_data:
+                    # Combine light and plant data
+                    combined_data = {
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "node_id": "light_growth_node",
+                        "light_sensor": self.light_data,
+                        "plant_heights": self.plant_data,
+                        "location": "greenhouse_section_3"
+                    }
+                    
+                    # Calculate statistics
+                    valid_heights = []
+                    for plant_key, plant_info in self.plant_data.items():
+                        if plant_info["height_cm"] > 0:
+                            valid_heights.append(plant_info["height_cm"])
+                    
+                    if valid_heights:
+                        combined_data["statistics"] = {
+                            "average_height": round(sum(valid_heights) / len(valid_heights), 1),
+                            "max_height": max(valid_heights),
+                            "min_height": min(valid_heights),
+                            "plants_with_readings": len(valid_heights),
+                            "total_plants": len(self.plant_data)
+                        }
+                    else:
+                        combined_data["statistics"] = {
+                            "average_height": 0,
+                            "max_height": 0,
+                            "min_height": 0,
+                            "plants_with_readings": 0,
+                            "total_plants": len(self.plant_data)
+                        }
+                    
+                    # Reset for next reading
+                    self.light_data = None
+                    self.plant_data = None
+                    
+                    return combined_data
+                else:
+                    logger.warning(f"Incomplete data: light_data={self.light_data is not None}, plant_data={self.plant_data is not None}")
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse line '{line}': {e}")
+            return None
+    
     def parse_light_line(self, line):
         """
         Parse light sensor line
-        Expected format: "Light: 25 (DARK) | LEDs: ON (78%)" or "Light: 50 (BRIGHT) | LEDs: OFF"
+        Expected formats:
+        - "Light: 25 (DARK) - Timer: 15s remaining | LEDs: OFF"
+        - "Light: 25 (DARK) | LEDs: ON (78%)"
+        - "Light: 50 (BRIGHT) | LEDs: OFF"
         """
         try:
             # Extract light level and status
             light_match = re.search(r'Light:\s*(\d+)\s*\((\w+)\)', line)
             if not light_match:
+                logger.warning(f"Could not match light pattern in: {line}")
                 return None
                 
             light_level = int(light_match.group(1))
             light_status = light_match.group(2)  # DARK or BRIGHT
             
-            # Extract LED status and brightness
-            led_status = "OFF"
-            led_brightness = 0
-            timer_remaining = 0
-            
-            if "LEDs: ON" in line:
-                led_status = "ON"
-                brightness_match = re.search(r'LEDs:\s*ON\s*\((\d+)%\)', line)
-                if brightness_match:
-                    led_brightness = int(brightness_match.group(1))
-            elif "LEDs: OFF" in line:
-                led_status = "OFF"
-            
             # Extract timer if present
+            timer_remaining = 0
             timer_match = re.search(r'Timer:\s*(\d+)s remaining', line)
             if timer_match:
                 timer_remaining = int(timer_match.group(1))
+            
+            # Extract LED status
+            led_status = "OFF"
+            led_brightness = 0
+            
+            if "LEDs: ON" in line:
+                led_status = "ON"
+                # Extract brightness percentage
+                brightness_match = re.search(r'LEDs:\s*ON\s*\((\d+)%\)', line)
+                if brightness_match:
+                    led_brightness = int(brightness_match.group(1))
+                else:
+                    # Calculate from LED_BRIGHTNESS constant (200/255 * 100)
+                    led_brightness = round((200 / 255) * 100)
+            elif "LEDs: OFF" in line:
+                led_status = "OFF"
             
             return {
                 "light_level": light_level,
@@ -139,14 +223,13 @@ class LightGrowthNodePublisher:
     def parse_plant_line(self, line):
         """
         Parse plant height line
-        Expected format: "Plant 1: 12.5 cm (Vegetative) | Plant 2: 8.2 cm (Seedling) | Plant 3: 18.7 cm (Mature)"
+        Expected format: "Plant 1: 12.5 cm (Vegetative) | Plant 2: 8.2 cm (Seedling) | Plant 3: No reading"
         """
         try:
             plants = {}
             
-            # Find all plant readings in the line
+            # Find all plant readings with height
             plant_matches = re.findall(r'Plant\s+(\d+):\s*([\d.]+)\s*cm\s*\((\w+)\)', line)
-            
             for match in plant_matches:
                 plant_num = int(match[0])
                 height = float(match[1])
@@ -157,7 +240,7 @@ class LightGrowthNodePublisher:
                     "growth_stage": growth_stage
                 }
             
-            # Also check for "No reading" plants
+            # Find plants with "No reading"
             no_reading_matches = re.findall(r'Plant\s+(\d+):\s*No reading', line)
             for match in no_reading_matches:
                 plant_num = int(match)
@@ -170,64 +253,6 @@ class LightGrowthNodePublisher:
             
         except Exception as e:
             logger.warning(f"Failed to parse plant line '{line}': {e}")
-            return None
-    
-    def parse_arduino_output(self, line):
-        """
-        Parse Arduino serial output and extract light and plant data
-        """
-        try:
-            line = line.strip()
-            
-            # Skip empty lines and separators
-            if not line or line.startswith("---") or "Greenhouse Node 3" in line:
-                return None
-            
-            # Parse light sensor data
-            if line.startswith("Light:"):
-                self.light_data = self.parse_light_line(line)
-                return None
-            
-            # Parse plant height data
-            elif line.startswith("Plant"):
-                plant_data = self.parse_plant_line(line)
-                if plant_data:
-                    self.plant_data.update(plant_data)
-                return None
-            
-            # Check if we have complete data after parsing a separator or at the end of a status block
-            elif "---" in line or not line:
-                if self.light_data and self.plant_data:
-                    # Combine light and plant data
-                    combined_data = {
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
-                        "node_id": "light_growth_node",
-                        "light_sensor": self.light_data,
-                        "plant_heights": self.plant_data,
-                        "location": "greenhouse_section_3"
-                    }
-                    
-                    # Calculate averages and statistics
-                    valid_heights = [p["height_cm"] for p in self.plant_data.values() if p["height_cm"] > 0]
-                    if valid_heights:
-                        combined_data["statistics"] = {
-                            "average_height": round(sum(valid_heights) / len(valid_heights), 1),
-                            "max_height": max(valid_heights),
-                            "min_height": min(valid_heights),
-                            "plants_with_readings": len(valid_heights),
-                            "total_plants": len(self.plant_data)
-                        }
-                    
-                    # Reset for next reading
-                    self.light_data = {}
-                    self.plant_data = {}
-                    
-                    return combined_data
-            
-            return None
-            
-        except Exception as e:
-            logger.warning(f"Failed to parse line '{line}': {e}")
             return None
     
     def publish_data(self, data):
