@@ -18,18 +18,6 @@ db_config = {
 def dashboard():
     return render_template('index.html')
 
-@app.route('/images')
-def images():
-    return render_template('image.html')
-
-@app.route('/datadetection')
-def datadetection():
-    return render_template('datadetection.html')
-
-@app.route('/plantcontrol')
-def plantcontrol():
-    return render_template('plantcontrol.html')
-
 
 @app.route('/temperature-ingest', methods=['POST'])
 def temperature_ingest():
@@ -43,7 +31,7 @@ def temperature_ingest():
     sector_id = 1  # make sure client sends this
 
     if temperature is None or humidity is None or sector_id is None:
-        return jsonify({'error': 'Missing temperature, humidity or sector_id'}), 400
+        return jsonify({'error': 'Missing temperature, humidity or sector_id'})>
 
     try:
         # Connect to MariaDB
