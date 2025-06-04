@@ -1,23 +1,7 @@
 /*
- * IoT Greenhouse - Node 1: Enhanced Soil Health System with Command Interface
+ * FIXED: IoT Greenhouse - Node 1: Enhanced Soil Health System with Command Interface
  * 
- * This system monitors 3 soil moisture sensors and automatically controls
- * a servo motor to direct water flow to the section that needs it most.
- * 
- * NEW: Accepts commands from Raspberry Pi for manual watering control
- * 
- * Commands accepted:
- * - WATER_SECTOR_1_15  (water sector 1 for 15 seconds)
- * - WATER_SECTOR_2_10  (water sector 2 for 10 seconds) 
- * - WATER_SECTOR_3_20  (water sector 3 for 20 seconds)
- * - STOP_MANUAL        (stop any manual watering)
- * - STATUS             (report current status)
- * 
- * Hardware Requirements:
- * - Arduino Uno/Nano
- * - 3x Soil Moisture Sensors
- * - 1x Servo Motor (SG90 or similar) - represents water flow direction control
- * - 1x LED (status indicator)
+ * This version fixes the command parsing bug
  */
 
 #include <Servo.h>
@@ -61,7 +45,7 @@ SystemState currentState = MONITORING;
 bool systemActive = true;
 int soilValues[3] = {0, 0, 0};
 
-// Manual watering control (NEW)
+// Manual watering control
 bool manualWateringActive = false;
 unsigned long manualWateringStart = 0;
 int manualWateringDuration = 0;
@@ -86,10 +70,10 @@ void setup() {
 }
 
 void loop() {
-  // Handle commands from Raspberry Pi (NEW)
+  // Handle commands from Raspberry Pi
   handleSerialCommands();
   
-  // Check manual watering timeout (NEW)
+  // Check manual watering timeout
   checkManualWatering();
   
   // Regular sensor reading and automation
@@ -97,7 +81,7 @@ void loop() {
     readSoilSensors();
     displaySensorReadings();
 
-    // Only run automatic control if not in manual mode (MODIFIED)
+    // Only run automatic control if not in manual mode
     if (systemActive && !manualWateringActive) {
       SystemState newState = determineSystemState();
       if (newState != currentState) {
@@ -118,13 +102,16 @@ void loop() {
   delay(100);
 }
 
-// NEW: Handle commands from Raspberry Pi
+// FIXED: Handle commands from Raspberry Pi
 void handleSerialCommands() {
   if (Serial.available()) {
     String command = Serial.readStringUntil('\n');
     command.trim();
     
     if (command.length() == 0) return;
+    
+    // Debug: Print received command
+    Serial.println(">>> RECEIVED: " + command);
     
     // Parse watering commands: WATER_SECTOR_X_Y
     if (command.startsWith("WATER_SECTOR_")) {
@@ -157,28 +144,56 @@ void handleSerialCommands() {
   }
 }
 
-// NEW: Parse watering command from Pi
+// FIXED: Parse watering command from Pi
 void parseWateringCommand(String command) {
-  // Parse: WATER_SECTOR_1_15
-  int firstUnderscore = command.indexOf('_', 13);  // After "WATER_SECTOR_"
-  int secondUnderscore = command.indexOf('_', firstUnderscore + 1);
+  // Debug: Show what we're parsing
+  Serial.println(">>> PARSING: " + command);
+  Serial.println(">>> LENGTH: " + String(command.length()));
   
-  if (firstUnderscore > 0 && secondUnderscore > 0) {
-    int sector = command.substring(13, firstUnderscore).toInt();
-    int duration = command.substring(secondUnderscore + 1).toInt();
-    
-    if (sector >= 1 && sector <= 3 && duration > 0 && duration <= 60) {
-      startManualWatering(sector, duration);
-      Serial.println(">>> MANUAL_WATERING_STARTED: Sector " + String(sector) + " for " + String(duration) + "s");
-    } else {
-      Serial.println(">>> INVALID_PARAMETERS: Sector must be 1-3, Duration 1-60s");
-    }
+  // Expected format: WATER_SECTOR_1_15
+  // Length should be at least 15 characters: "WATER_SECTOR_X_Y"
+  if (command.length() < 15) {
+    Serial.println(">>> ERROR: Command too short");
+    return;
+  }
+  
+  // Find the underscores
+  int firstUnderscore = command.indexOf('_');
+  int secondUnderscore = command.indexOf('_', firstUnderscore + 1);
+  int thirdUnderscore = command.indexOf('_', secondUnderscore + 1);
+  
+  Serial.println(">>> UNDERSCORES AT: " + String(firstUnderscore) + ", " + String(secondUnderscore) + ", " + String(thirdUnderscore));
+  
+  // We need exactly 2 underscores (positions should be valid, third should be -1)
+  if (firstUnderscore == -1 || secondUnderscore == -1 || thirdUnderscore == -1) {
+    Serial.println(">>> ERROR: Need exactly 2 underscores");
+    return;
+  }
+  
+  // Extract sector and duration
+  String sectorStr = command.substring(secondUnderscore + 1, thirdUnderscore);
+  String durationStr = command.substring(thirdUnderscore + 1);
+  
+  Serial.println(">>> SECTOR_STR: '" + sectorStr + "'");
+  Serial.println(">>> DURATION_STR: '" + durationStr + "'");
+  
+  int sector = sectorStr.toInt();
+  int duration = durationStr.toInt();
+  
+  Serial.println(">>> PARSED_SECTOR: " + String(sector));
+  Serial.println(">>> PARSED_DURATION: " + String(duration));
+  
+  // Validate parameters
+  if (sector >= 1 && sector <= 3 && duration > 0 && duration <= 60) {
+    startManualWatering(sector, duration);
+    Serial.println(">>> MANUAL_WATERING_STARTED: Sector " + String(sector) + " for " + String(duration) + "s");
   } else {
-    Serial.println(">>> COMMAND_FORMAT_ERROR: Use WATER_SECTOR_X_Y");
+    Serial.println(">>> INVALID_PARAMETERS: Sector=" + String(sector) + " Duration=" + String(duration));
+    Serial.println(">>> VALID_RANGES: Sector 1-3, Duration 1-60s");
   }
 }
 
-// NEW: Start manual watering
+// Start manual watering
 void startManualWatering(int sector, int duration) {
   // Stop any current automation
   manualWateringActive = true;
@@ -201,7 +216,7 @@ void startManualWatering(int sector, int duration) {
   Serial.println(">>> SERVO_POSITION: " + String(servoPosition) + " degrees");
 }
 
-// NEW: Check manual watering timeout
+// Check manual watering timeout
 void checkManualWatering() {
   if (manualWateringActive) {
     unsigned long elapsed = millis() - manualWateringStart;
@@ -213,7 +228,7 @@ void checkManualWatering() {
   }
 }
 
-// NEW: Stop manual watering
+// Stop manual watering
 void stopManualWatering() {
   manualWateringActive = false;
   waterDirectionServo.write(SERVO_NEUTRAL);
@@ -223,7 +238,7 @@ void stopManualWatering() {
   Serial.println(">>> SERVO_POSITION: 0 degrees (NEUTRAL)");
 }
 
-// NEW: Detailed status report for Pi
+// Detailed status report for Pi
 void reportDetailedStatus() {
   Serial.println(">>> STATUS_REPORT_START");
   Serial.println(">>> SYSTEM_STATE: " + getStateString(currentState));
